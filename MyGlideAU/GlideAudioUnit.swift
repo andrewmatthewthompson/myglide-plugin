@@ -50,7 +50,7 @@ public class GlideAudioUnit: AUAudioUnit {
             switch param.address {
             case 0: return String(format: "%.0f ms", value)
             case 1: return String(format: "%.0f%%", value)
-            case 2: return String(format: "±%.0f", value)
+            case 2: return String(format: "\u{00B1}%.0f", value)
             default: return String(format: "%.1f", value)
             }
         }
@@ -68,7 +68,8 @@ public class GlideAudioUnit: AUAudioUnit {
     }
 
     public override var internalRenderBlock: AUInternalRenderBlock {
-        let kern = kernel
+        // Capture an Unmanaged reference to avoid ARC retain/release on the audio thread.
+        let kernRef = Unmanaged.passUnretained(kernel)
         let musicalContext = self.musicalContextBlock
 
         return { actionFlags, timestamp, frameCount, outputBusNumber,
@@ -82,6 +83,8 @@ public class GlideAudioUnit: AUAudioUnit {
             var pullFlags = AudioUnitRenderActionFlags(rawValue: 0)
             let status = pullInputBlock(&pullFlags, timestamp, frameCount, 0, outputData)
             guard status == noErr else { return status }
+
+            let kern = kernRef.takeUnretainedValue()
 
             // Query host transport for beat position and tempo
             if let musicalContext = musicalContext {
@@ -98,44 +101,18 @@ public class GlideAudioUnit: AUAudioUnit {
             }
 
             // Walk MIDI event linked list and forward to DSP
-            var event = realtimeEventListHead?.pointee
-            while event != nil {
-                if event!.head.eventType == .MIDI {
-                    let midi = event!.MIDI
+            var eventPtr = realtimeEventListHead
+            while let event = eventPtr {
+                if event.pointee.head.eventType == .MIDI {
+                    let midi = event.pointee.MIDI
                     kern.handleMIDIEvent(midi.data.0, data1: midi.data.1, data2: midi.data.2)
                 }
-                if let next = event!.head.next {
-                    event = next.pointee
-                } else {
-                    event = nil
-                }
+                eventPtr = event.pointee.head.next
             }
 
             // Process audio with pitch shifting
             kern.process(outputData, frameCount: frameCount)
             return noErr
-        }
-    }
-
-    // MARK: - Preset Persistence
-
-    private static let automationKey = "automationCurveData"
-
-    public override var fullState: [String: Any]? {
-        get {
-            var state = super.fullState ?? [:]
-
-            // Serialize automation curve
-            let maxBytes = 4 + 256 * 24  // header + max breakpoints
-            var data = Data(count: maxBytes)
-            // We can't directly call serialize from Swift, so we'll store breakpoints
-            // through the parameter tree's fullState mechanism
-            state[GlideAudioUnit.automationKey] = data
-            return state
-        }
-        set {
-            super.fullState = newValue
-            // Deserialization handled when automation data is present
         }
     }
 }

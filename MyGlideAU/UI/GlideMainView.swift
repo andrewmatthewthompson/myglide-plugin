@@ -11,16 +11,11 @@ private func noteName(midi: Int) -> String {
     return "\(name)\(octave)"
 }
 
-private func midiForNoteName(_ name: String, octave: Int) -> Int {
-    guard let idx = noteNames.firstIndex(of: name) else { return 60 }
-    return (octave + 1) * 12 + idx
-}
-
 // MARK: - Automation State (shared between UI and DSP)
 
-/// Bridges the C++ AutomationCurve to SwiftUI via the kernel bridge.
+/// Bridges the C++ AutomationCurve to SwiftUI via proper Obj-C++ bridge methods.
+/// No raw pointer manipulation — all curve edits go through the bridge.
 class AutomationState: ObservableObject {
-    /// Swift-side mirror of breakpoints for display.
     struct UIBreakpoint: Identifiable {
         let id = UUID()
         var beat: Double
@@ -74,140 +69,22 @@ class AutomationState: ObservableObject {
         commitToDSP()
     }
 
-    /// Push breakpoints to the C++ triple-buffer.
+    /// Push breakpoints to the C++ triple-buffer via proper bridge methods.
     private func commitToDSP() {
-        guard let bridge = kernelBridge,
-              let curvePtr = bridge.automationCurvePtr() else { return }
+        guard let bridge = kernelBridge else { return }
 
-        // Access the AutomationCurve via its opaque pointer
-        // We use the bridge methods to manipulate the curve
-        let curve = curvePtr.assumingMemoryBound(to: UInt8.self)
-
-        // Build serialized data and write through
-        // For simplicity, we rebuild the curve each time
-        typealias CurveType = OpaquePointer
-
-        // Direct memory manipulation: call beginEdit, add breakpoints, commitEdit
-        // We cast the void* to our C++ AutomationCurve layout
-        // This works because AutomationCurve's methods are called through the pointer
-
-        // Use a simpler approach: serialize breakpoints to Data,
-        // pass through bridge. For now, use the low-level pointer approach.
-
-        // The AutomationCurve pointer lets us call methods directly via the bridge.
-        // Since we can't call C++ methods from Swift directly, we'll serialize.
-        commitViaSerialize()
-    }
-
-    private func commitViaSerialize() {
-        guard let bridge = kernelBridge,
-              let curvePtr = bridge.automationCurvePtr() else { return }
-
-        // We need to serialize our breakpoints and write them to the curve.
-        // Since we can't call C++ methods directly from Swift, we'll use
-        // the bridge's Obj-C interface for curve manipulation.
-        // For the initial implementation, we rebuild by:
-        // 1. Serialize to bytes matching AutomationCurve::deserialize format
-        // 2. Write through the opaque pointer
-
-        // Breakpoint layout in C++: { double beat, double semitones, uint8_t interp } + padding
-        // Total struct size = 17 bytes (but likely padded to 24)
-        // Actually in C++ it's: double(8) + double(8) + uint8_t(1) = 17, padded to 24
-
-        // For safety, we'll manipulate the triple buffer directly.
-        // The AutomationCurve stores Buffer structs with Breakpoint arrays.
-
-        // Simpler approach: we know the memory layout. A Buffer has:
-        // - Breakpoint[256] at offset 0
-        // - int count at offset 256 * sizeof(Breakpoint)
-        // Each Breakpoint is: double beat(8) + double semitones(8) + uint8_t interp(1) + 7 padding = 24 bytes
-
-        // Write to the "write buffer" index, then set pending flag.
-        // We access the AutomationCurve at curvePtr.
-
-        // For robustness in v1, notify the bridge to rebuild the curve:
-        notifyBridgeOfBreakpoints()
-    }
-
-    private func notifyBridgeOfBreakpoints() {
-        // Build the serialized byte array matching AutomationCurve::deserialize
-        // Header: int32 count (4 bytes)
-        // Then count * sizeof(Breakpoint) bytes
-        // Breakpoint = { double beat, double semitones, InterpolationType(uint8_t) }
-        // sizeof(Breakpoint) in C++ with padding = likely 24 bytes
-
-        var data = Data()
-        var count = Int32(breakpoints.count)
-        data.append(Data(bytes: &count, count: 4))
+        bridge.automationBeginEdit()
+        bridge.automationClear()
 
         for bp in breakpoints {
-            var beat = bp.beat
-            var semi = bp.semitones
-            var interp = UInt8(bp.interpType)
-            data.append(Data(bytes: &beat, count: 8))
-            data.append(Data(bytes: &semi, count: 8))
-            data.append(Data(bytes: &interp, count: 1))
-            // Pad to match C++ struct alignment (24 bytes total per Breakpoint)
-            let padding = Data(count: 7)
-            data.append(padding)
+            bridge.automationAddBreakpoint(
+                atBeat: bp.beat,
+                semitones: bp.semitones,
+                interpType: UInt8(bp.interpType)
+            )
         }
 
-        // Write directly into the automation curve's write buffer via pointer
-        guard let bridge = kernelBridge,
-              let curvePtr = bridge.automationCurvePtr() else { return }
-
-        // The AutomationCurve has methods beginEdit/deserialize/commitEdit.
-        // Since we can't call them from Swift, we write to the raw memory.
-        // This is safe because the UI thread owns the write buffer.
-
-        // AutomationCurve memory layout:
-        // mBuffers[3]: each Buffer = { Breakpoint[256], int count }
-        // mReadIndex: atomic<int> (at offset after buffers)
-        // mPendingIndex: atomic<int>
-        // mWriteIndex: int
-
-        let breakpointSize = 24  // sizeof(Breakpoint) with padding
-        let bufferSize = 256 * breakpointSize + 4  // points[256] + count(int)
-        let totalBuffersSize = 3 * bufferSize
-
-        // Read mWriteIndex (last 4 bytes of the struct after atomics)
-        // Layout: mBuffers[3] + atomic<int> mReadIndex + atomic<int> mPendingIndex + int mWriteIndex
-        // atomic<int> is typically 4 bytes on most platforms
-        let writeIndexOffset = totalBuffersSize + 4 + 4  // after mReadIndex + mPendingIndex
-        let writeIndexPtr = curvePtr.advanced(by: writeIndexOffset)
-        let writeIndex = writeIndexPtr.assumingMemoryBound(to: Int32.self).pointee
-
-        // Write breakpoints into the write buffer
-        let writeBufferOffset = Int(writeIndex) * bufferSize
-        let writeBufferPtr = curvePtr.advanced(by: writeBufferOffset)
-
-        // Copy breakpoint data
-        let pointsPtr = writeBufferPtr
-        for (i, bp) in breakpoints.enumerated() {
-            let bpPtr = pointsPtr.advanced(by: i * breakpointSize)
-            bpPtr.assumingMemoryBound(to: Double.self).pointee = bp.beat
-            bpPtr.advanced(by: 8).assumingMemoryBound(to: Double.self).pointee = bp.semitones
-            bpPtr.advanced(by: 16).assumingMemoryBound(to: UInt8.self).pointee = UInt8(bp.interpType)
-        }
-
-        // Write count at end of buffer
-        let countPtr = writeBufferPtr.advanced(by: 256 * breakpointSize)
-        countPtr.assumingMemoryBound(to: Int32.self).pointee = Int32(breakpoints.count)
-
-        // Set pending index (atomic store with release semantics)
-        let pendingOffset = totalBuffersSize + 4  // after mReadIndex
-        let pendingPtr = curvePtr.advanced(by: pendingOffset)
-        pendingPtr.assumingMemoryBound(to: Int32.self).pointee = writeIndex
-
-        // Find next write buffer (not read, not pending)
-        let readOffset = totalBuffersSize
-        let readIndex = curvePtr.advanced(by: readOffset).assumingMemoryBound(to: Int32.self).pointee
-        for i: Int32 in 0..<3 {
-            if i != readIndex && i != writeIndex {
-                writeIndexPtr.assumingMemoryBound(to: Int32.self).pointee = i
-                break
-            }
-        }
+        bridge.automationCommitEdit()
     }
 }
 
@@ -310,7 +187,6 @@ struct GlideMainView: View {
 
             Divider().frame(height: 20).background(Color.white.opacity(0.3))
 
-            // Interpolation mode
             Picker("", selection: $automation.interpolationMode) {
                 Text("Linear").tag(0)
                 Text("Smooth").tag(1)
@@ -322,7 +198,6 @@ struct GlideMainView: View {
                 automation.setInterpolationMode(newVal)
             }
 
-            // Snap toggle
             Toggle("Snap", isOn: $automation.snapEnabled)
                 .toggleStyle(.checkbox)
                 .foregroundColor(.white.opacity(0.8))
@@ -337,7 +212,6 @@ struct GlideMainView: View {
 
             Spacer()
 
-            // Mix knob
             HStack(spacing: 4) {
                 Text("MIX")
                     .font(.system(size: 9, weight: .semibold))
@@ -347,7 +221,6 @@ struct GlideMainView: View {
                     .foregroundColor(.white)
             }
 
-            // Glide time
             HStack(spacing: 4) {
                 Text("GLIDE")
                     .font(.system(size: 9, weight: .semibold))
@@ -369,7 +242,6 @@ struct GlideMainView: View {
             let noteHeight = geo.size.height / CGFloat(noteCount)
 
             ZStack(alignment: .topLeading) {
-                // Background
                 Color(red: 0.08, green: 0.10, blue: 0.16)
 
                 ForEach(0..<noteCount, id: \.self) { i in
@@ -393,7 +265,6 @@ struct GlideMainView: View {
                     .offset(y: y)
                 }
 
-                // Horizontal grid lines on C notes
                 ForEach(0..<noteCount, id: \.self) { i in
                     let midi = noteRangeHigh - 1 - i
                     if midi % 12 == 0 {
@@ -417,7 +288,6 @@ struct GlideMainView: View {
             let pitchRange = Double(noteCount)
 
             ZStack {
-                // Background grid
                 Canvas { context, canvasSize in
                     drawGrid(context: context, size: canvasSize, noteCount: noteCount)
                     drawCurves(context: context, size: canvasSize, pitchRange: pitchRange)
@@ -425,7 +295,7 @@ struct GlideMainView: View {
                     drawPlayhead(context: context, size: canvasSize)
                 }
 
-                // Interaction overlay: click to add, drag to move
+                // Click to add, drag to move
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(
@@ -434,11 +304,7 @@ struct GlideMainView: View {
                                 let beat = xToBeat(value.location.x, width: size.width)
                                 let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
 
-                                // Check if near an existing breakpoint
-                                if let idx = nearestBreakpointIndex(at: value.location, size: size, pitchRange: pitchRange, threshold: 12) {
-                                    // If drag distance is tiny, it's a click — delete on double-tap
-                                    // For now, single-click on existing = do nothing (drag handles movement)
-                                } else {
+                                if nearestBreakpointIndex(at: value.location, size: size, pitchRange: pitchRange, threshold: 12) == nil {
                                     automation.addBreakpoint(beat: beat, semitones: semi)
                                 }
                             }
@@ -454,7 +320,7 @@ struct GlideMainView: View {
                             }
                     )
 
-                // Delete overlay: breakpoint dots as tappable views
+                // Double-click to delete
                 ForEach(Array(automation.breakpoints.enumerated()), id: \.element.id) { index, bp in
                     let x = beatToX(bp.beat, width: size.width)
                     let y = semitonesToY(bp.semitones, height: size.height, range: pitchRange)
@@ -475,7 +341,6 @@ struct GlideMainView: View {
 
     private var beatRuler: some View {
         GeometryReader { geo in
-            let width = geo.size.width - 50  // subtract piano sidebar
             ZStack(alignment: .leading) {
                 Color(red: 0.08, green: 0.10, blue: 0.16)
 
@@ -487,14 +352,12 @@ struct GlideMainView: View {
                             let beat = viewStartBeat + Double(i)
                             let x = CGFloat(i) / CGFloat(beatsVisible) * size.width
 
-                            // Tick mark
                             context.stroke(
                                 Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: 6)) },
                                 with: .color(.white.opacity(beat.truncatingRemainder(dividingBy: 4) == 0 ? 0.6 : 0.3)),
                                 lineWidth: 0.5
                             )
 
-                            // Beat number
                             if i < Int(beatsVisible) {
                                 let text = Text("\(Int(beat) + 1)").font(.system(size: 9, design: .monospaced))
                                 context.draw(text, at: CGPoint(x: x + 8, y: 14))
@@ -511,7 +374,6 @@ struct GlideMainView: View {
     private func drawGrid(context: GraphicsContext, size: CGSize, noteCount: Int) {
         let noteHeight = size.height / CGFloat(noteCount)
 
-        // Horizontal lines (per note)
         for i in 0...noteCount {
             let y = CGFloat(i) * noteHeight
             let midi = noteRangeHigh - i
@@ -523,7 +385,6 @@ struct GlideMainView: View {
             )
         }
 
-        // Vertical lines (per beat)
         let beatsVisible = viewBeats
         for i in 0...Int(beatsVisible) {
             let x = CGFloat(i) / CGFloat(beatsVisible) * size.width
@@ -547,16 +408,11 @@ struct GlideMainView: View {
         for step in 0...steps {
             let x = CGFloat(step)
             let beat = xToBeat(x, width: size.width)
-
-            // Evaluate the curve manually matching AutomationCurve logic
             let semi = evaluateCurve(at: beat)
             let y = semitonesToY(semi, height: size.height, range: pitchRange)
 
-            if step == 0 {
-                path.move(to: CGPoint(x: x, y: y))
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
+            if step == 0 { path.move(to: CGPoint(x: x, y: y)) }
+            else { path.addLine(to: CGPoint(x: x, y: y)) }
         }
 
         context.stroke(path, with: .color(Color.cyan.opacity(0.8)), lineWidth: 1.5)
@@ -566,19 +422,15 @@ struct GlideMainView: View {
         for bp in automation.breakpoints {
             let x = beatToX(bp.beat, width: size.width)
             let y = semitonesToY(bp.semitones, height: size.height, range: pitchRange)
-            let center = CGPoint(x: x, y: y)
 
-            // Outer glow
             context.fill(
                 Path(ellipseIn: CGRect(x: x - 6, y: y - 6, width: 12, height: 12)),
                 with: .color(Color.cyan.opacity(0.3))
             )
-            // Inner dot
             context.fill(
                 Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)),
                 with: .color(Color.cyan)
             )
-            // Center
             context.fill(
                 Path(ellipseIn: CGRect(x: x - 2, y: y - 2, width: 4, height: 4)),
                 with: .color(.white)
@@ -601,16 +453,14 @@ struct GlideMainView: View {
     // MARK: - Coordinate Conversion
 
     private func beatToX(_ beat: Double, width: CGFloat) -> CGFloat {
-        return CGFloat((beat - viewStartBeat) / viewBeats) * width
+        CGFloat((beat - viewStartBeat) / viewBeats) * width
     }
 
     private func xToBeat(_ x: CGFloat, width: CGFloat) -> Double {
-        return viewStartBeat + Double(x / width) * viewBeats
+        viewStartBeat + Double(x / width) * viewBeats
     }
 
     private func semitonesToY(_ semi: Double, height: CGFloat, range: Double) -> CGFloat {
-        // Map semitones to note position: higher notes = lower Y
-        // semi=0 is relative to the middle of the view range
         let midNote = Double(noteRangeLow + noteRangeHigh) / 2.0
         let noteInRange = midNote + semi
         let normalized = (Double(noteRangeHigh) - noteInRange) / range
@@ -633,7 +483,6 @@ struct GlideMainView: View {
         if beat <= bps[0].beat { return bps[0].semitones }
         if beat >= bps[bps.count - 1].beat { return bps[bps.count - 1].semitones }
 
-        // Find segment
         var lo = 0, hi = bps.count - 1
         while lo < hi - 1 {
             let mid = (lo + hi) / 2
@@ -646,11 +495,11 @@ struct GlideMainView: View {
         let t = (beat - a.beat) / span
 
         switch a.interpType {
-        case 2: return a.semitones  // step
-        case 1: // smooth
+        case 2: return a.semitones
+        case 1:
             let s = t * t * (3.0 - 2.0 * t)
             return a.semitones + (b.semitones - a.semitones) * s
-        default: // linear
+        default:
             return a.semitones + (b.semitones - a.semitones) * t
         }
     }
@@ -677,9 +526,9 @@ struct GlideMainView: View {
 
     private func isNoteActive(_ midi: Int) -> Bool {
         if midi < 64 {
-            return (activeNoteMask.0 & (1 << midi)) != 0
+            return (activeNoteMask.0 & (UInt64(1) << midi)) != 0
         } else {
-            return (activeNoteMask.1 & (1 << (midi - 64))) != 0
+            return (activeNoteMask.1 & (UInt64(1) << (midi - 64))) != 0
         }
     }
 

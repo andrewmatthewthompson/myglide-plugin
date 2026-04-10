@@ -3,7 +3,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 
 /// Thin wrapper: adapts AudioBufferList to GlideProcessor's float** interface
-/// and forwards MIDI / transport state.
+/// and forwards MIDI / transport / automation state.
 class GlideDSPKernel {
 public:
     void setUp(int32_t channelCount, double sampleRate) {
@@ -39,8 +39,37 @@ public:
         mProcessor.setBeatPosition(beatPosition, tempo);
     }
 
-    void* automationCurvePtr() {
-        return mProcessor.automationCurvePtr();
+    // ── Automation curve bridge (called from UI thread via Obj-C) ────────
+
+    void automationBeginEdit() {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->beginEdit();
+    }
+
+    void automationAddBreakpoint(double beat, double semitones, uint8_t interpType) {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->addBreakpoint(beat, semitones, static_cast<InterpolationType>(interpType));
+    }
+
+    void automationRemoveBreakpoint(int index) {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->removeBreakpoint(index);
+    }
+
+    void automationMoveBreakpoint(int index, double beat, double semitones) {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->moveBreakpoint(index, beat, semitones);
+    }
+
+    void automationClear() {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->beginEdit();
+        curve->clearBreakpoints();
+    }
+
+    void automationCommitEdit() {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->commitEdit();
     }
 
     uint64_t activeNoteBitmaskLo() const { return mProcessor.activeNoteBitmaskLo(); }

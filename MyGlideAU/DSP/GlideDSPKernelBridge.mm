@@ -33,8 +33,30 @@
     _kernel.setBeatPosition(beatPosition, tempo);
 }
 
-- (void *)automationCurvePtr {
-    return _kernel.automationCurvePtr();
+// ── Automation curve bridge methods ──────────────────────────────────────
+
+- (void)automationBeginEdit {
+    _kernel.automationBeginEdit();
+}
+
+- (void)automationAddBreakpointAtBeat:(double)beat semitones:(double)semitones interpType:(uint8_t)interpType {
+    _kernel.automationAddBreakpoint(beat, semitones, interpType);
+}
+
+- (void)automationRemoveBreakpointAtIndex:(int)index {
+    _kernel.automationRemoveBreakpoint(index);
+}
+
+- (void)automationMoveBreakpointAtIndex:(int)index toBeat:(double)beat semitones:(double)semitones {
+    _kernel.automationMoveBreakpoint(index, beat, semitones);
+}
+
+- (void)automationClear {
+    _kernel.automationClear();
+}
+
+- (void)automationCommitEdit {
+    _kernel.automationCommitEdit();
 }
 
 - (uint64_t)activeNoteBitmaskLo {

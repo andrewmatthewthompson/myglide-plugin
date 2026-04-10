@@ -6,14 +6,19 @@
 
 /// Real-time granular pitch shifter with 2 overlapping grains.
 /// Adapted from MyVerb's shimmer engine with improvements:
-///   - Hann window (smoother than triangular) for COLA
+///   - Hann window via precomputed LUT (no trig per sample)
 ///   - Cubic Hermite interpolation on reads (less aliasing)
 ///   - Continuous semitone control for glide automation
+///   - Cached pitch ratio to avoid pow() per-sample
 ///
 /// RT-safe: uses pre-allocated external buffer, no allocations in process().
 class GranularPitchShifter {
 public:
     GranularPitchShifter() = default;
+
+    // Non-copyable: holds a non-owning pointer to shared buffer memory.
+    GranularPitchShifter(const GranularPitchShifter&) = delete;
+    GranularPitchShifter& operator=(const GranularPitchShifter&) = delete;
 
     /// Configure with external memory. grainMs = grain duration (default 30ms).
     /// bufferPtr must point to at least bufferSize doubles.
@@ -23,26 +28,37 @@ public:
         mSampleRate = sampleRate;
         mGrainSamples = static_cast<int32_t>(grainMs * 0.001 * sampleRate);
         if (mGrainSamples < 4) mGrainSamples = 4;
+        if (mGrainSamples > kMaxGrainSamples) mGrainSamples = kMaxGrainSamples;
 
-        // Clear buffer
+        // Precompute Hann window LUT (eliminates cos() from the audio loop)
+        for (int32_t i = 0; i < mGrainSamples; ++i) {
+            double phase = static_cast<double>(i) / static_cast<double>(mGrainSamples);
+            mHannLUT[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+        }
+
         std::memset(mBuffer, 0, sizeof(double) * bufferSize);
 
         mWritePos = 0;
         mPitchRatio = 1.0;
+        mLastSemitones = 0.0;
 
         // Initialize two grains at 50% phase offset.
-        // Initial age = grainSamples * max(pitchRatio, 1) to ensure enough
-        // buffered data for the read head to traverse.
         double initAge = static_cast<double>(mGrainSamples) * 2.0;
         mGrains[0].phase = 0.0;
+        mGrains[0].sampleIndex = 0;
         mGrains[0].age = initAge;
         mGrains[1].phase = 0.5;
+        mGrains[1].sampleIndex = mGrainSamples / 2;
         mGrains[1].age = initAge + mGrainSamples * 0.5;
     }
 
     /// Set pitch shift in semitones. 0 = no shift, +12 = octave up, -12 = octave down.
+    /// Only recalculates pow() when the value actually changes (>0.001 threshold).
     void setPitchSemitones(double semitones) {
-        mPitchRatio = std::pow(2.0, semitones / 12.0);
+        if (std::fabs(semitones - mLastSemitones) > 0.001) {
+            mPitchRatio = std::pow(2.0, semitones / 12.0);
+            mLastSemitones = semitones;
+        }
     }
 
     /// Process a single sample. Write input, read pitch-shifted output.
@@ -54,40 +70,45 @@ public:
         mWritePos = (mWritePos + 1) % mBufferSize;
 
         double output = 0.0;
-        double grainSize = static_cast<double>(mGrainSamples);
+        const double grainSize = static_cast<double>(mGrainSamples);
+        const double bufSize = static_cast<double>(mBufferSize);
 
         for (int g = 0; g < 2; ++g) {
             Grain& grain = mGrains[g];
 
-            // Hann window based on phase (0..1 within grain)
-            double window = 0.5 * (1.0 - std::cos(2.0 * M_PI * grain.phase));
+            // Hann window from precomputed LUT (no trig)
+            int32_t lutIdx = grain.sampleIndex;
+            if (lutIdx < 0) lutIdx = 0;
+            if (lutIdx >= mGrainSamples) lutIdx = mGrainSamples - 1;
+            double window = mHannLUT[lutIdx];
 
             // Read position: write head minus age
             double readPos = static_cast<double>(mWritePos) - grain.age;
-            // Wrap into buffer range
-            while (readPos < 0.0) readPos += mBufferSize;
+            // Conditional wrap (cheaper than fmod — readPos is in [-bufSize, +bufSize] range)
+            if (readPos < 0.0) readPos += bufSize;
+            else if (readPos >= bufSize) readPos -= bufSize;
 
             // Cubic Hermite interpolation
             output += window * hermiteRead(readPos);
 
-            // Advance grain: write head moves +1 per sample, read head moves +pitchRatio.
-            // Age (gap between write and read) changes by (1 - pitchRatio).
-            // For pitch up (ratio>1), age decreases (read catches up).
-            // For pitch down (ratio<1), age increases (read falls behind).
+            // Advance grain
             grain.age += (1.0 - mPitchRatio);
             grain.phase += 1.0 / grainSize;
+            grain.sampleIndex++;
 
             // Reset grain when it completes
             if (grain.phase >= 1.0) {
                 grain.phase -= 1.0;
-                // Reset age: need enough buffered data for the grain to read
+                grain.sampleIndex = 0;
                 grain.age = grainSize * std::max(mPitchRatio, 1.0);
             }
 
             // Safety: keep age within valid buffer range
-            double maxAge = static_cast<double>(mBufferSize - 4);
-            if (grain.age > maxAge) grain.age = grainSize;
-            if (grain.age < 2.0) grain.age = grainSize;
+            double maxAge = bufSize - 4.0;
+            if (grain.age > maxAge || grain.age < 2.0 ||
+                std::isnan(grain.age) || std::isinf(grain.age)) {
+                grain.age = grainSize;
+            }
         }
 
         return output;
@@ -98,8 +119,9 @@ public:
 
 private:
     struct Grain {
-        double phase = 0.0;  // 0..1 within grain
-        double age   = 0.0;  // samples behind write head
+        double phase = 0.0;       // 0..1 within grain
+        double age   = 0.0;       // samples behind write head
+        int32_t sampleIndex = 0;  // integer index into Hann LUT
     };
 
     /// 4-point cubic Hermite interpolation at fractional position.
@@ -107,11 +129,19 @@ private:
         int i0 = static_cast<int>(pos);
         double frac = pos - i0;
 
-        // 4 adjacent samples
-        double y_1 = mBuffer[((i0 - 1) % mBufferSize + mBufferSize) % mBufferSize];
-        double y0  = mBuffer[i0 % mBufferSize];
-        double y1  = mBuffer[(i0 + 1) % mBufferSize];
-        double y2  = mBuffer[(i0 + 2) % mBufferSize];
+        // Wrap indices safely — pos is already in [0, bufferSize) so i0 is valid,
+        // but i0-1 and i0+2 need wrapping.
+        int im1 = i0 - 1;
+        if (im1 < 0) im1 += mBufferSize;
+        int ip1 = i0 + 1;
+        if (ip1 >= mBufferSize) ip1 -= mBufferSize;
+        int ip2 = i0 + 2;
+        if (ip2 >= mBufferSize) ip2 -= mBufferSize;
+
+        double y_1 = mBuffer[im1];
+        double y0  = mBuffer[i0];
+        double y1  = mBuffer[ip1];
+        double y2  = mBuffer[ip2];
 
         // Hermite coefficients
         double c0 = y0;
@@ -122,12 +152,17 @@ private:
         return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
 
+    // Max grain size: 100ms @ 192kHz = 19200 samples
+    static constexpr int32_t kMaxGrainSamples = 19200;
+
     double* mBuffer     = nullptr;
     int32_t mBufferSize = 0;
     int32_t mWritePos   = 0;
     double  mSampleRate = 48000.0;
-    int32_t mGrainSamples = 1440;  // 30ms @ 48kHz
+    int32_t mGrainSamples = 1440;
     double  mPitchRatio = 1.0;
+    double  mLastSemitones = 0.0;
 
-    Grain mGrains[2];
+    double  mHannLUT[kMaxGrainSamples] = {};  // precomputed Hann window
+    Grain   mGrains[2];
 };

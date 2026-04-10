@@ -17,9 +17,9 @@ enum ParamAddress : uint64_t {
 /// MIDI pitch automation processor.
 ///
 /// Architecture:
-///   - Receives MIDI note on/off → tracks active notes for UI display
+///   - Receives MIDI note on/off -> tracks active notes for UI display
 ///   - Reads beat position from host transport
-///   - Evaluates AutomationCurve at current beat → target semitones
+///   - Evaluates AutomationCurve at current beat -> target semitones
 ///   - Smooths pitch via ParameterSmoother (glide time controls convergence)
 ///   - Applies pitch shift via GranularPitchShifter
 ///   - Mixes wet/dry per the mix parameter
@@ -30,7 +30,14 @@ public:
     GlideProcessor() = default;
     ~GlideProcessor() { tearDown(); }
 
+    // Non-copyable (owns raw memory, contains atomics)
+    GlideProcessor(const GlideProcessor&) = delete;
+    GlideProcessor& operator=(const GlideProcessor&) = delete;
+
     void setUp(int32_t channelCount, double sampleRate) {
+        // Tear down any existing state first
+        tearDown();
+
         mChannelCount = channelCount;
         mSampleRate   = sampleRate;
 
@@ -40,21 +47,21 @@ public:
         mSmGlideTime.setTarget(50.0);    // 50ms default smoothing
         mSmMix.setTarget(100.0);          // 100% wet default
 
-        // Pitch smoother: convergence time set dynamically from glideTime param
+        // Pitch smoother: initial convergence from default glide time
         mSmPitch.configure(sampleRate, 50.0);
         mSmPitch.setTarget(0.0);
+        mLastGlideTimeMs = 50.0;
 
         // Allocate single contiguous memory block for pitch shifters
-        // Each channel needs a circular buffer for the pitch shifter
-        // Buffer size: 0.5 seconds of audio (generous for pitch shifting)
+        // Buffer size: 0.5 seconds of audio per channel
         mPitchBufSize = static_cast<int32_t>(sampleRate * 0.5);
-        int totalSamples = mPitchBufSize * channelCount;
+        int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
+        int totalSamples = mPitchBufSize * clampedChannels;
 
-        delete[] mMemory;
         mMemory = new double[totalSamples]();
 
         // Configure pitch shifters with their slice of memory
-        for (int32_t ch = 0; ch < channelCount && ch < kMaxChannels; ++ch) {
+        for (int32_t ch = 0; ch < clampedChannels; ++ch) {
             double* buf = mMemory + ch * mPitchBufSize;
             mPitchShifters[ch].configure(buf, mPitchBufSize, sampleRate, 30.0);
         }
@@ -95,23 +102,20 @@ public:
         uint8_t velocity = data2 & 0x7F;
 
         if (type == 0x90 && velocity > 0) {
-            // Note On
             mActiveNotes[note] = velocity;
+            // Set bit
+            if (note < 64)
+                mNoteBitmaskLo.fetch_or(1ULL << note, std::memory_order_relaxed);
+            else
+                mNoteBitmaskHi.fetch_or(1ULL << (note - 64), std::memory_order_relaxed);
         } else if (type == 0x80 || (type == 0x90 && velocity == 0)) {
-            // Note Off
             mActiveNotes[note] = 0;
+            // Clear bit
+            if (note < 64)
+                mNoteBitmaskLo.fetch_and(~(1ULL << note), std::memory_order_relaxed);
+            else
+                mNoteBitmaskHi.fetch_and(~(1ULL << (note - 64)), std::memory_order_relaxed);
         }
-
-        // Update bitmasks for UI
-        uint64_t lo = 0, hi = 0;
-        for (int i = 0; i < 64; ++i) {
-            if (mActiveNotes[i] > 0) lo |= (1ULL << i);
-        }
-        for (int i = 64; i < 128; ++i) {
-            if (mActiveNotes[i] > 0) hi |= (1ULL << (i - 64));
-        }
-        mNoteBitmaskLo.store(lo, std::memory_order_relaxed);
-        mNoteBitmaskHi.store(hi, std::memory_order_relaxed);
     }
 
     // ── Transport ────────────────────────────────────────────────────────
@@ -124,12 +128,15 @@ public:
     // ── Process ──────────────────────────────────────────────────────────
 
     void process(float** buffers, int32_t channelCount, int32_t frameCount) {
+        if (!mMemory) return;
+
         // Swap automation buffer if UI committed changes
         mAutomation.swapIfPending();
 
         double beatPos = mBeatPosition.load(std::memory_order_relaxed);
         double tempo = mTempo.load(std::memory_order_relaxed);
         double beatsPerSample = (tempo > 0.0) ? (tempo / 60.0 / mSampleRate) : 0.0;
+        int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
 
         for (int32_t frame = 0; frame < frameCount; ++frame) {
             const double glideTimeMs = mSmGlideTime.next();
@@ -137,19 +144,20 @@ public:
             const double wetGain = mix / 100.0;
             const double dryGain = 1.0 - wetGain;
 
+            // Reconfigure pitch smoother when glide time changes significantly
+            // (avoids calling exp() every sample — only when the knob moves)
+            if (std::fabs(glideTimeMs - mLastGlideTimeMs) > 0.5) {
+                mSmPitch.configure(mSampleRate, glideTimeMs);
+                mLastGlideTimeMs = glideTimeMs;
+            }
+
             // Evaluate automation curve at current beat position
             double targetSemitones = mAutomation.evaluate(beatPos);
-
-            // Update pitch smoother convergence rate from glideTime parameter
-            // Reconfigure is cheap — just a coefficient update
-            double convergeSamples = glideTimeMs * 0.001 * mSampleRate;
-            double coeff = (convergeSamples > 0.0) ? std::exp(-1.0 / convergeSamples) : 0.0;
             mSmPitch.setTarget(targetSemitones);
-
             double smoothedSemitones = mSmPitch.next();
 
             // Apply pitch shift to each channel
-            for (int32_t ch = 0; ch < channelCount && ch < kMaxChannels; ++ch) {
+            for (int32_t ch = 0; ch < clampedChannels; ++ch) {
                 double input = static_cast<double>(buffers[ch][frame]) + 1e-20;
 
                 mPitchShifters[ch].setPitchSemitones(smoothedSemitones);
@@ -190,6 +198,7 @@ private:
     ParameterSmoother mSmGlideTime;
     ParameterSmoother mSmMix;
     ParameterSmoother mSmPitch;   // smooths the automation curve output
+    double mLastGlideTimeMs = 50.0; // cache to avoid reconfiguring every sample
 
     // Pitch shifting
     GranularPitchShifter mPitchShifters[kMaxChannels];

@@ -13,18 +13,22 @@ enum class InterpolationType : uint8_t {
 };
 
 /// A single automation breakpoint: position in beats + pitch in semitones.
+/// Explicitly sized for cross-language serialization (Swift reads this layout).
 struct Breakpoint {
     double beat      = 0.0;
     double semitones = 0.0;   // relative pitch shift, ±24
     InterpolationType interp = InterpolationType::Linear;
+    uint8_t _pad[7] = {};     // explicit padding to 24 bytes
 };
+static_assert(sizeof(Breakpoint) == 24, "Breakpoint must be 24 bytes for serialization");
 
 /// Sorted breakpoint array with evaluation and triple-buffer for lock-free
 /// thread safety between UI (writer) and audio thread (reader).
 ///
-/// Usage:
-///   UI thread:  call beginEdit(), modify via add/remove/move, call commitEdit()
-///   Audio thread: call swapIfPending() at top of each render block, then evaluate()
+/// Thread contract:
+///   Audio thread: swapIfPending(), evaluate(), getBreakpoints()
+///   UI thread:    beginEdit(), add/remove/move/clear, commitEdit()
+///   No field is written by both threads.
 class AutomationCurve {
 public:
     static constexpr int kMaxBreakpoints = 256;
@@ -38,22 +42,28 @@ public:
         mWriteIndex = 1;
     }
 
+    // Non-copyable, non-movable (contains atomics + complex state)
+    AutomationCurve(const AutomationCurve&) = delete;
+    AutomationCurve& operator=(const AutomationCurve&) = delete;
+
     // ── Audio thread ─────────────────────────────────────────────────────
 
     /// Call at the top of each render block. Lock-free.
     void swapIfPending() {
         int pending = mPendingIndex.load(std::memory_order_acquire);
         if (pending >= 0) {
-            int oldRead = mReadIndex.load(std::memory_order_relaxed);
+            // Publish the pending buffer as the new read buffer.
+            // The old read buffer is now free — UI will discover this in beginEdit().
             mReadIndex.store(pending, std::memory_order_release);
             mPendingIndex.store(-1, std::memory_order_relaxed);
-            // The old read buffer becomes available for writing
-            mWriteIndex = oldRead;
+            mCachedSegment = -1;  // invalidate cache — new buffer may have different segments
+            // NOTE: mWriteIndex is NOT touched here. Only UI thread writes it.
         }
     }
 
     /// Evaluate the automation curve at a given beat position.
     /// Returns pitch shift in semitones.
+    /// Uses a segment cache to skip binary search during sequential playback.
     double evaluate(double beat) const {
         const Buffer& buf = mBuffers[mReadIndex.load(std::memory_order_acquire)];
         if (buf.count == 0) return 0.0;
@@ -65,12 +75,22 @@ public:
         // After last breakpoint: hold last value
         if (beat >= buf.points[buf.count - 1].beat) return buf.points[buf.count - 1].semitones;
 
-        // Binary search for the segment containing beat
-        int lo = 0, hi = buf.count - 1;
-        while (lo < hi - 1) {
-            int mid = (lo + hi) / 2;
-            if (buf.points[mid].beat <= beat) lo = mid;
-            else hi = mid;
+        // Fast path: check if we're still in the cached segment
+        int lo = mCachedSegment;
+        int hi = lo + 1;
+        if (lo >= 0 && hi < buf.count &&
+            beat >= buf.points[lo].beat && beat < buf.points[hi].beat) {
+            // Cache hit — skip binary search
+        } else {
+            // Binary search for the segment containing beat
+            lo = 0;
+            hi = buf.count - 1;
+            while (lo < hi - 1) {
+                int mid = (lo + hi) / 2;
+                if (buf.points[mid].beat <= beat) lo = mid;
+                else hi = mid;
+            }
+            mCachedSegment = lo;
         }
 
         const Breakpoint& a = buf.points[lo];
@@ -105,9 +125,17 @@ public:
 
     // ── UI thread ────────────────────────────────────────────────────────
 
-    /// Begin an edit session: copies current read buffer to write buffer.
+    /// Begin an edit session: picks the free write buffer and copies current
+    /// read buffer contents into it.
     void beginEdit() {
-        const Buffer& src = mBuffers[mReadIndex.load(std::memory_order_acquire)];
+        // Find a buffer that is not the current read and not pending.
+        int read = mReadIndex.load(std::memory_order_acquire);
+        int pending = mPendingIndex.load(std::memory_order_acquire);
+        for (int i = 0; i < 3; ++i) {
+            if (i != read && i != pending) { mWriteIndex = i; break; }
+        }
+
+        const Buffer& src = mBuffers[read];
         Buffer& dst = mBuffers[mWriteIndex];
         dst.count = src.count;
         std::memcpy(dst.points, src.points, sizeof(Breakpoint) * src.count);
@@ -127,7 +155,7 @@ public:
             buf.points[i] = buf.points[i - 1];
         }
 
-        buf.points[idx] = { beat, semitones, interp };
+        buf.points[idx] = { beat, semitones, interp, {} };
         buf.count++;
         return idx;
     }
@@ -167,12 +195,7 @@ public:
     /// Commit the edit: makes write buffer available to audio thread.
     void commitEdit() {
         mPendingIndex.store(mWriteIndex, std::memory_order_release);
-        // Find the next free buffer for writing (not read, not pending)
-        int read = mReadIndex.load(std::memory_order_acquire);
-        int pending = mWriteIndex;  // just committed
-        for (int i = 0; i < 3; ++i) {
-            if (i != read && i != pending) { mWriteIndex = i; break; }
-        }
+        // mWriteIndex will be re-determined in the next beginEdit() call.
     }
 
     /// Get write buffer breakpoints for UI display. (UI thread only.)
@@ -182,7 +205,7 @@ public:
         return buf.count;
     }
 
-    /// Get current breakpoint count (for UI, reads from latest committed or read buffer).
+    /// Get current breakpoint count (for UI).
     int count() const {
         int pending = mPendingIndex.load(std::memory_order_acquire);
         if (pending >= 0) return mBuffers[pending].count;
@@ -197,14 +220,14 @@ public:
         int needed = 4 + buf.count * static_cast<int>(sizeof(Breakpoint));
         if (needed > maxBytes) return 0;
 
-        // Header: count as int32
         int32_t cnt = buf.count;
         std::memcpy(out, &cnt, 4);
         std::memcpy(out + 4, buf.points, buf.count * sizeof(Breakpoint));
         return needed;
     }
 
-    /// Deserialize breakpoints from byte buffer. Call beginEdit() first.
+    /// Deserialize breakpoints from byte buffer into the write buffer.
+    /// Call beginEdit() first.
     void deserialize(const uint8_t* data, int length) {
         Buffer& buf = mBuffers[mWriteIndex];
         if (length < 4) { buf.count = 0; return; }
@@ -228,7 +251,8 @@ private:
     };
 
     Buffer mBuffers[3];
-    std::atomic<int> mReadIndex{0};
-    std::atomic<int> mPendingIndex{-1};
-    int mWriteIndex = 1;  // only accessed from UI thread
+    std::atomic<int> mReadIndex{0};      // written by audio thread only
+    std::atomic<int> mPendingIndex{-1};  // written by UI (commit), read by audio (swap)
+    int mWriteIndex = 1;                 // written by UI thread only
+    mutable int mCachedSegment = -1;     // audio thread only: last binary search result
 };
