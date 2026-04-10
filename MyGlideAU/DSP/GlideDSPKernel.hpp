@@ -78,6 +78,9 @@ public:
     uint64_t activeNoteBitmaskHi() const { return mProcessor.activeNoteBitmaskHi(); }
     double currentBeatPosition() const { return mProcessor.currentBeatPosition(); }
 
+    int32_t latencySamples() const { return mProcessor.latencySamples(); }
+    double tailTimeSeconds() const { return mProcessor.tailTimeSeconds(); }
+
 private:
     GlideProcessor mProcessor;
     int32_t mChannelCount = 2;

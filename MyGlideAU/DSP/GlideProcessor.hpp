@@ -201,6 +201,17 @@ public:
         return mBeatPosition.load(std::memory_order_relaxed);
     }
 
+    /// Latency in samples introduced by the granular pitch shifter.
+    /// Logic Pro uses this for Plugin Delay Compensation (PDC).
+    int32_t latencySamples() const { return mGrainSamples; }
+
+    /// Tail time in seconds: how long audio rings out after input stops.
+    /// The pitch shifter grains can produce output for up to one grain duration
+    /// after the last input sample.
+    double tailTimeSeconds() const {
+        return (mSampleRate > 0.0) ? (double(mGrainSamples) / mSampleRate) : 0.0;
+    }
+
 private:
     static constexpr int kMaxChannels = 2;
 

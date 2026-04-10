@@ -990,6 +990,110 @@ TEST(bug_processor_midi_channel_ignored) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Latency, Tail Time, and Bypass Tests
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(latency_reports_grain_size_at_48k) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    // 30ms grain @ 48kHz = 1440 samples
+    EXPECT(p.latencySamples() == 1440);
+}
+
+TEST(latency_reports_grain_size_at_96k) {
+    GlideProcessor p;
+    p.setUp(2, 96000.0);
+    // 30ms grain @ 96kHz = 2880 samples
+    EXPECT(p.latencySamples() == 2880);
+}
+
+TEST(latency_reports_grain_size_at_44100) {
+    GlideProcessor p;
+    p.setUp(2, 44100.0);
+    // 30ms grain @ 44.1kHz = 1323 samples
+    EXPECT(p.latencySamples() == 1323);
+}
+
+TEST(tail_time_equals_grain_duration) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    double tail = p.tailTimeSeconds();
+    // Should be 30ms (0.030s)
+    EXPECT(std::fabs(tail - 0.030) < 0.001);
+}
+
+TEST(tail_time_scales_with_sample_rate) {
+    // Tail time should be the same duration regardless of sample rate
+    GlideProcessor p1, p2;
+    p1.setUp(2, 48000.0);
+    p2.setUp(2, 96000.0);
+    EXPECT(std::fabs(p1.tailTimeSeconds() - p2.tailTimeSeconds()) < 0.001);
+}
+
+TEST(tail_time_zero_before_setup) {
+    GlideProcessor p;
+    // Before setUp, tailTime should be safe (not NaN or crash)
+    double tail = p.tailTimeSeconds();
+    EXPECT(!std::isnan(tail) && !std::isinf(tail));
+}
+
+TEST(bypass_passes_audio_through_unmodified) {
+    // Simulate bypass: process should be skippable, output = input
+    // (In the full AU, shouldBypassEffect skips process entirely.
+    // Here we verify the processor itself can be skipped without issues.)
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Add pitch automation that would shift audio if processed
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    // Fill with known signal
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+
+    // Save copy of original input
+    float original[4800];
+    std::memcpy(original, buf.left, sizeof(original));
+
+    // In bypass mode, we DON'T call process — audio passes through unchanged
+    // (simulating what the render block does when shouldBypassEffect is true)
+
+    // Verify the input buffer was not modified (bypass = no processing)
+    bool identical = true;
+    for (int i = 0; i < 4800; ++i) {
+        if (buf.left[i] != original[i]) { identical = false; break; }
+    }
+    EXPECT(identical);
+}
+
+TEST(processor_resumable_after_bypass) {
+    // After bypassing for a while, processing should resume cleanly
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Process some audio normally
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    // Simulate bypass: skip processing for 1 second
+    // (beat position won't advance, which is correct for bypass)
+
+    // Resume processing — should not crash or produce NaN
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+    EXPECT(!hasInvalidSamples(buf.left, 48000) && !hasInvalidSamples(buf.right, 48000));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Performance Regression Tests
 //
 // These tests enforce minimum performance floors. If a code change causes

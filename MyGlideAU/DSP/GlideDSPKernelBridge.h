@@ -28,4 +28,8 @@
 - (uint64_t)activeNoteBitmaskHi;
 - (double)currentBeatPosition;
 
+// Latency and tail time (for Logic Pro PDC and offline bounce)
+- (int32_t)latencySamples;
+- (double)tailTimeSeconds;
+
 @end

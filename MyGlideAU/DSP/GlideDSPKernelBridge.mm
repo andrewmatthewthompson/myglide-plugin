@@ -71,4 +71,12 @@
     return _kernel.currentBeatPosition();
 }
 
+- (int32_t)latencySamples {
+    return _kernel.latencySamples();
+}
+
+- (double)tailTimeSeconds {
+    return _kernel.tailTimeSeconds();
+}
+
 @end
