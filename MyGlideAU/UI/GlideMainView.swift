@@ -29,6 +29,8 @@ class AutomationState: ObservableObject {
     @Published var beatSnapDivision: Double = 0.25  // 0=free, 1.0=1/4, 0.5=1/8, 0.25=1/16
     @Published var canUndo: Bool = false
     @Published var canRedo: Bool = false
+    @Published var drawMode: Bool = false        // pencil tool: drag to create breakpoints
+    @Published var selectedIndex: Int? = nil      // for Delete key
 
     private weak var kernelBridge: GlideDSPKernelBridge?
     private var undoStack: [[UIBreakpoint]] = []
@@ -84,6 +86,30 @@ class AutomationState: ObservableObject {
 
     func endDrag() {
         dragUndoPushed = false
+    }
+
+    /// Draw mode: add a breakpoint along the drag path (called on each onChanged).
+    /// Only adds if far enough from the last breakpoint to avoid clutter.
+    func drawBreakpoint(beat: Double, semitones: Double) {
+        let snappedBeat = snapBeat(beat)
+        let snappedSemi = snapEnabled ? semitones.rounded() : semitones
+
+        // Skip if too close to the last breakpoint (min 0.25 beat apart)
+        if let last = breakpoints.last, abs(snappedBeat - last.beat) < 0.2 {
+            return
+        }
+
+        breakpoints.append(UIBreakpoint(beat: snappedBeat, semitones: snappedSemi, interpType: interpolationMode))
+        breakpoints.sort { $0.beat < $1.beat }
+        commitToDSP()
+    }
+
+    func deleteSelected() {
+        guard let idx = selectedIndex, idx >= 0, idx < breakpoints.count else { return }
+        pushUndo()
+        breakpoints.remove(at: idx)
+        selectedIndex = nil
+        commitToDSP()
     }
 
     // MARK: - Editing
@@ -165,6 +191,7 @@ class GlideParameterState: ObservableObject {
     @Published var glideTime: Double = 50.0
     @Published var mix: Double = 100.0
     @Published var pitchRange: Double = 24.0
+    @Published var pitchOffset: Double = 0.0
 
     private var parameterTree: AUParameterTree?
     private var observerToken: AUParameterObserverToken?
@@ -191,6 +218,7 @@ class GlideParameterState: ObservableObject {
         case 0: glideTime = value
         case 1: mix = value
         case 2: pitchRange = value
+        case 3: pitchOffset = value
         default: break
         }
         isExternalUpdate = false
@@ -244,12 +272,14 @@ struct GlideMainView: View {
         }
         .frame(width: 700, height: 500)
         .background(
-            // Hidden buttons for keyboard shortcuts (Cmd+Z, Cmd+Shift+Z)
+            // Hidden buttons for keyboard shortcuts
             Group {
                 Button("") { automation.undo() }
                     .keyboardShortcut("z", modifiers: .command)
                 Button("") { automation.redo() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
+                Button("") { automation.deleteSelected() }
+                    .keyboardShortcut(.delete, modifiers: [])
             }
             .frame(width: 0, height: 0)
             .opacity(0)
@@ -322,6 +352,15 @@ struct GlideMainView: View {
                 .frame(width: 100)
             }
 
+            // Draw mode toggle (pencil tool)
+            Toggle(isOn: $automation.drawMode) {
+                Image(systemName: "pencil.line")
+                    .font(.system(size: 11))
+            }
+            .toggleStyle(.button)
+            .foregroundColor(automation.drawMode ? .cyan : .white.opacity(0.6))
+            .help("Draw mode: drag to create breakpoints")
+
             Button("Clear") { automation.clearAll() }
                 .buttonStyle(.borderless)
                 .foregroundColor(.red.opacity(0.8))
@@ -337,6 +376,17 @@ struct GlideMainView: View {
                 Text(String(format: "%+.1f st", currentPitch))
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(abs(currentPitch) < 0.1 ? .white.opacity(0.5) : .cyan)
+            }
+
+            if abs(params.pitchOffset) > 0.1 {
+                HStack(spacing: 4) {
+                    Text("OFFSET")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.5))
+                    Text(String(format: "%+.1f", params.pitchOffset))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.orange)
+                }
             }
 
             HStack(spacing: 4) {
@@ -422,7 +472,7 @@ struct GlideMainView: View {
                     drawPlayhead(context: context, size: canvasSize, pitchRange: pitchRange)
                 }
 
-                // Click to add, drag to move
+                // Interaction layer: click to add/select, drag to move or draw
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(
@@ -431,7 +481,9 @@ struct GlideMainView: View {
                                 let beat = xToBeat(value.location.x, width: size.width)
                                 let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
 
-                                if nearestBreakpointIndex(at: value.location, size: size, pitchRange: pitchRange, threshold: 12) == nil {
+                                if let idx = nearestBreakpointIndex(at: value.location, size: size, pitchRange: pitchRange, threshold: 12) {
+                                    automation.selectedIndex = idx
+                                } else if !automation.drawMode {
                                     automation.addBreakpoint(beat: beat, semitones: semi)
                                 }
                             }
@@ -439,10 +491,15 @@ struct GlideMainView: View {
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 5)
                             .onChanged { value in
-                                if let idx = nearestBreakpointIndex(at: value.startLocation, size: size, pitchRange: pitchRange, threshold: 12) {
+                                let beat = xToBeat(value.location.x, width: size.width)
+                                let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
+
+                                if automation.drawMode {
+                                    // Draw mode: create breakpoints along the drag path
                                     automation.beginDrag()
-                                    let beat = xToBeat(value.location.x, width: size.width)
-                                    let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
+                                    automation.drawBreakpoint(beat: beat, semitones: semi)
+                                } else if let idx = nearestBreakpointIndex(at: value.startLocation, size: size, pitchRange: pitchRange, threshold: 12) {
+                                    automation.beginDrag()
                                     automation.moveBreakpoint(index: idx, beat: beat, semitones: semi)
                                 }
                             }
@@ -612,13 +669,23 @@ struct GlideMainView: View {
     }
 
     private func drawBreakpoints(context: GraphicsContext, size: CGSize, pitchRange: Double) {
-        for bp in automation.breakpoints {
+        for (i, bp) in automation.breakpoints.enumerated() {
             let x = beatToX(bp.beat, width: size.width)
             let y = semitonesToY(bp.semitones, height: size.height, range: pitchRange)
+            let isSelected = automation.selectedIndex == i
+
+            // Selection ring
+            if isSelected {
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: x - 8, y: y - 8, width: 16, height: 16)),
+                    with: .color(.white),
+                    lineWidth: 1.5
+                )
+            }
 
             context.fill(
                 Path(ellipseIn: CGRect(x: x - 6, y: y - 6, width: 12, height: 12)),
-                with: .color(Color.cyan.opacity(0.3))
+                with: .color(Color.cyan.opacity(isSelected ? 0.5 : 0.3))
             )
             context.fill(
                 Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)),

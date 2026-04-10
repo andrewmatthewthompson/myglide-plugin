@@ -74,7 +74,77 @@ public class GlideAudioUnit: AUAudioUnit {
             case 0: return String(format: "%.0f ms", value)
             case 1: return String(format: "%.0f%%", value)
             case 2: return String(format: "\u{00B1}%.0f", value)
+            case 3: return String(format: "%+.1f st", value)
             default: return String(format: "%.1f", value)
+            }
+        }
+    }
+
+    // MARK: - Factory Presets
+
+    private static let factoryPresetData: [(name: String, glideTime: Float, mix: Float, breakpoints: [(beat: Double, semi: Double, interp: UInt8)])] = [
+        (name: "Octave Glide Up",
+         glideTime: 80, mix: 100,
+         breakpoints: [(0.0, 0.0, 1), (4.0, 12.0, 1)]),
+
+        (name: "Octave Glide Down",
+         glideTime: 80, mix: 100,
+         breakpoints: [(0.0, 0.0, 1), (4.0, -12.0, 1)]),
+
+        (name: "Slow Portamento",
+         glideTime: 300, mix: 100,
+         breakpoints: [(0.0, 0.0, 1), (4.0, 7.0, 1), (8.0, 0.0, 1), (12.0, 5.0, 1), (16.0, 0.0, 1)]),
+
+        (name: "DJ Riser",
+         glideTime: 50, mix: 100,
+         breakpoints: [(0.0, 0.0, 0), (16.0, 24.0, 0)]),
+
+        (name: "Chromatic Walk",
+         glideTime: 30, mix: 100,
+         breakpoints: [(0.0, 0.0, 0), (2.0, 2.0, 0), (4.0, 4.0, 0), (6.0, 7.0, 0), (8.0, 12.0, 0)]),
+
+        (name: "Wobble",
+         glideTime: 20, mix: 80,
+         breakpoints: [(0.0, 0.0, 1), (1.0, 2.0, 1), (2.0, -2.0, 1), (3.0, 2.0, 1), (4.0, -2.0, 1),
+                       (5.0, 2.0, 1), (6.0, -2.0, 1), (7.0, 2.0, 1), (8.0, 0.0, 1)]),
+
+        (name: "Step Sequence",
+         glideTime: 10, mix: 100,
+         breakpoints: [(0.0, 0.0, 2), (2.0, 5.0, 2), (4.0, 3.0, 2), (6.0, 7.0, 2),
+                       (8.0, 0.0, 2), (10.0, 5.0, 2), (12.0, 12.0, 2), (14.0, 0.0, 2)]),
+    ]
+
+    public override var factoryPresets: [AUAudioUnitPreset]? {
+        return GlideAudioUnit.factoryPresetData.enumerated().map { index, data in
+            AUAudioUnitPreset(number: index, name: data.name)
+        }
+    }
+
+    private var _currentPreset: AUAudioUnitPreset?
+    public override var currentPreset: AUAudioUnitPreset? {
+        get { return _currentPreset }
+        set {
+            _currentPreset = newValue
+            guard let preset = newValue, preset.number >= 0,
+                  preset.number < GlideAudioUnit.factoryPresetData.count else { return }
+
+            let data = GlideAudioUnit.factoryPresetData[preset.number]
+
+            // Set parameters
+            _parameterTree?.parameter(withAddress: 0)?.value = data.glideTime
+            _parameterTree?.parameter(withAddress: 1)?.value = data.mix
+            _parameterTree?.parameter(withAddress: 3)?.value = 0  // reset pitch offset
+
+            // Set automation breakpoints
+            kernel.automationBeginEdit()
+            kernel.automationClear()
+            for bp in data.breakpoints {
+                kernel.automationAddBreakpoint(atBeat: bp.beat, semitones: bp.semi, interpType: bp.interp)
+            }
+            kernel.automationCommitEdit()
+
+            DispatchQueue.main.async { [weak self] in
+                self?.onStateRestored?()
             }
         }
     }

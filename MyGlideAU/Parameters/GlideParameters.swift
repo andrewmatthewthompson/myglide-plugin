@@ -4,9 +4,10 @@ import AVFoundation
 enum GlideParameters {
 
     enum Address: AUParameterAddress {
-        case glideTime  = 0   // Pitch smoothing rate (ms)
-        case mix        = 1   // Wet/dry mix (%)
-        case pitchRange = 2   // Display range: 12 or 24 semitones
+        case glideTime   = 0   // Pitch smoothing rate (ms)
+        case mix         = 1   // Wet/dry mix (%)
+        case pitchRange  = 2   // Display range: 12 or 24 semitones
+        case pitchOffset = 3   // DAW-automatable pitch offset (semitones)
     }
 
     static func createParameters() -> [AUParameter] {
@@ -40,6 +41,18 @@ enum GlideParameters {
                 name: "Pitch Range",
                 address: Address.pitchRange.rawValue,
                 min: 12,
+                max: 24,
+                unit: .generic,
+                unitName: "semi",
+                flags: [.flag_IsReadable, .flag_IsWritable],
+                valueStrings: nil,
+                dependentParameters: nil
+            ),
+            AUParameterTree.createParameter(
+                withIdentifier: "pitchOffset",
+                name: "Pitch Offset",
+                address: Address.pitchOffset.rawValue,
+                min: -24,
                 max: 24,
                 unit: .generic,
                 unitName: "semi",

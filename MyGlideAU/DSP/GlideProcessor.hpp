@@ -9,9 +9,10 @@
 
 /// Parameter addresses — keep in sync with GlideParameters.swift
 enum ParamAddress : uint64_t {
-    kGlideTime  = 0,   // Pitch smoothing rate (ms)
-    kMix        = 1,   // Wet/dry mix (%)
-    kPitchRange = 2,   // Display range: 12 or 24 semitones
+    kGlideTime    = 0,   // Pitch smoothing rate (ms)
+    kMix          = 1,   // Wet/dry mix (%)
+    kPitchRange   = 2,   // Display range: 12 or 24 semitones
+    kPitchOffset  = 3,   // DAW-automatable pitch offset (semitones, ±24)
 };
 
 /// MIDI pitch automation processor.
@@ -44,13 +45,19 @@ public:
         // Configure parameter smoothers
         mSmGlideTime.configure(sampleRate);
         mSmMix.configure(sampleRate);
+        mSmPitchOffset.configure(sampleRate);
         mSmGlideTime.setTarget(50.0);    // 50ms default smoothing
         mSmMix.setTarget(100.0);          // 100% wet default
+        mSmPitchOffset.setTarget(0.0);    // no DAW offset by default
 
         // Pitch smoother: initial convergence from default glide time
         mSmPitch.configure(sampleRate, 50.0);
         mSmPitch.setTarget(0.0);
         mLastGlideTimeMs = 50.0;
+
+        // Anti-aliasing filter state
+        mAAFilterL = 0.0;
+        mAAFilterR = 0.0;
 
         // Allocate single contiguous memory block for:
         //   - Pitch shifter circular buffers (0.5s per channel)
@@ -92,17 +99,19 @@ public:
 
     void setParameter(uint64_t address, float value) {
         switch (static_cast<ParamAddress>(address)) {
-            case kGlideTime:  mSmGlideTime.setTarget(value); break;
-            case kMix:        mSmMix.setTarget(value);       break;
-            case kPitchRange: mPitchRange = static_cast<int>(value); break;
+            case kGlideTime:    mSmGlideTime.setTarget(value);    break;
+            case kMix:          mSmMix.setTarget(value);          break;
+            case kPitchRange:   mPitchRange = static_cast<int>(value); break;
+            case kPitchOffset:  mSmPitchOffset.setTarget(value);  break;
         }
     }
 
     float getParameter(uint64_t address) const {
         switch (static_cast<ParamAddress>(address)) {
-            case kGlideTime:  return static_cast<float>(mSmGlideTime.current());
-            case kMix:        return static_cast<float>(mSmMix.current());
-            case kPitchRange: return static_cast<float>(mPitchRange);
+            case kGlideTime:    return static_cast<float>(mSmGlideTime.current());
+            case kMix:          return static_cast<float>(mSmMix.current());
+            case kPitchRange:   return static_cast<float>(mPitchRange);
+            case kPitchOffset:  return static_cast<float>(mSmPitchOffset.current());
         }
         return 0.0f;
     }
@@ -154,21 +163,26 @@ public:
         for (int32_t frame = 0; frame < frameCount; ++frame) {
             const double glideTimeMs = mSmGlideTime.next();
             const double mix = mSmMix.next();
+            const double pitchOffset = mSmPitchOffset.next();
             const double wetGain = mix / 100.0;
             const double dryGain = 1.0 - wetGain;
 
             // Update pitch smoother rate when glide time changes significantly.
-            // Uses updateCoefficient (not configure) to avoid resetting mCurrent,
-            // which would cause audible pitch discontinuities.
             if (std::fabs(glideTimeMs - mLastGlideTimeMs) > 0.5) {
                 mSmPitch.updateCoefficient(mSampleRate, glideTimeMs);
                 mLastGlideTimeMs = glideTimeMs;
             }
 
-            // Evaluate automation curve at current beat position
-            double targetSemitones = mAutomation.evaluate(beatPos);
+            // Evaluate automation curve + DAW pitch offset
+            double targetSemitones = mAutomation.evaluate(beatPos) + pitchOffset;
             mSmPitch.setTarget(targetSemitones);
             double smoothedSemitones = mSmPitch.next();
+
+            // Anti-aliasing filter coefficient: lowpass cutoff adapts to pitch ratio.
+            // At +12 semitones (2x), Nyquist is halved, so cutoff = sampleRate/4.
+            // At 0 semitones, filter is wide open (coeff near 0 = no filtering).
+            double ratio = std::pow(2.0, std::fabs(smoothedSemitones) / 12.0);
+            double aaCoeff = (ratio > 1.05) ? std::min(0.9, 1.0 - 1.0 / ratio) : 0.0;
 
             // Apply pitch shift to each channel
             for (int32_t ch = 0; ch < clampedChannels; ++ch) {
@@ -176,6 +190,13 @@ public:
 
                 mPitchShifters[ch].setPitchSemitones(smoothedSemitones);
                 double wet = mPitchShifters[ch].process(input);
+
+                // One-pole lowpass anti-aliasing filter on wet signal
+                if (aaCoeff > 0.0) {
+                    double& state = (ch == 0) ? mAAFilterL : mAAFilterR;
+                    state = state * aaCoeff + wet * (1.0 - aaCoeff);
+                    wet = state;
+                }
 
                 buffers[ch][frame] = static_cast<float>(input * dryGain + wet * wetGain);
             }
@@ -226,8 +247,13 @@ private:
     // Parameter smoothers
     ParameterSmoother mSmGlideTime;
     ParameterSmoother mSmMix;
-    ParameterSmoother mSmPitch;   // smooths the automation curve output
-    double mLastGlideTimeMs = 50.0; // cache to avoid reconfiguring every sample
+    ParameterSmoother mSmPitchOffset;  // DAW-automatable pitch offset
+    ParameterSmoother mSmPitch;        // smooths the combined automation + offset output
+    double mLastGlideTimeMs = 50.0;
+
+    // Anti-aliasing filter state (one-pole lowpass per channel)
+    double mAAFilterL = 0.0;
+    double mAAFilterR = 0.0;
 
     // Pitch shifting
     GranularPitchShifter mPitchShifters[kMaxChannels];
