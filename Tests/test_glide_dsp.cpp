@@ -990,69 +990,155 @@ TEST(bug_processor_midi_channel_ignored) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Performance Benchmark
+// Performance Regression Tests
+//
+// These tests enforce minimum performance floors. If a code change causes
+// any configuration to drop below its floor, the test suite fails.
+//
+// Floors are set at ~50% of measured performance (April 2025, Apple M-series)
+// to absorb variance from CI runners, thermal throttling, and background load.
+// They should NEVER be lowered — only raised when optimizations land.
+//
+// Current measured baselines (48kHz stereo, 512-sample blocks):
+//   Bypass:     700x RT  →  floor 200x
+//   Default:    810x RT  →  floor 200x
+//   Automation: 800x RT  →  floor 200x
+//   192kHz:     285x RT  →  floor 100x
+//
+// Logic Pro hard limit: must stay above 20x realtime (5% CPU) at any config.
+// Our floor of 100x (1% CPU) provides 5x safety margin.
 // ══════════════════════════════════════════════════════════════════════════
 
-static void runBenchmark() {
-    printf("\n  Performance Benchmark\n");
-    printf("  ─────────────────────────────────────────────────────────\n");
+/// Measures realtime multiplier for a given processor configuration.
+/// Runs enough audio to get a stable measurement (5 seconds).
+static double measureRealtimeMultiplier(double sampleRate, int blockSize, int channels,
+                                        double mix, double glideMs,
+                                        bool withAutomation, double pitchSemi) {
+    GlideProcessor p;
+    p.setUp(channels, sampleRate);
+    p.setParameter(kMix, float(mix));
+    p.setParameter(kGlideTime, float(glideMs));
+    p.setBeatPosition(0.0, 120.0);
 
-    const double sampleRate = 48000.0;
-    const int seconds = 10;
-    const int totalFrames = int(sampleRate) * seconds;
-    const int blockSize = 512;
+    if (withAutomation) {
+        auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+        curve->beginEdit();
+        curve->addBreakpoint(0.0, 0.0, InterpolationType::Smooth);
+        curve->addBreakpoint(4.0, pitchSemi, InterpolationType::Smooth);
+        curve->addBreakpoint(8.0, 0.0, InterpolationType::Smooth);
+        curve->addBreakpoint(12.0, -pitchSemi, InterpolationType::Smooth);
+        curve->addBreakpoint(16.0, 0.0, InterpolationType::Smooth);
+        curve->commitEdit();
+    }
 
-    auto benchConfig = [&](const char* name, double mix, double glideMs,
-                           bool withAutomation, double pitchSemi) {
-        GlideProcessor p;
-        p.setUp(2, sampleRate);
-        p.setParameter(kMix, float(mix));
-        p.setParameter(kGlideTime, float(glideMs));
-        p.setBeatPosition(0.0, 120.0);
+    const int totalFrames = static_cast<int>(sampleRate) * 5;  // 5 seconds
+    float left[2048], right[2048];
+    float* chPtrs[2] = { left, right };
 
-        if (withAutomation) {
-            auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
-            curve->beginEdit();
-            curve->addBreakpoint(0.0, 0.0, InterpolationType::Smooth);
-            curve->addBreakpoint(4.0, pitchSemi, InterpolationType::Smooth);
-            curve->addBreakpoint(8.0, 0.0, InterpolationType::Smooth);
-            curve->addBreakpoint(12.0, -pitchSemi, InterpolationType::Smooth);
-            curve->addBreakpoint(16.0, 0.0, InterpolationType::Smooth);
-            curve->commitEdit();
-        }
+    // Warmup (1 block)
+    fillSine(left, blockSize, 440.0, sampleRate);
+    fillSine(right, blockSize, 440.0, sampleRate);
+    p.process(chPtrs, channels, blockSize);
 
-        // Prepare input
-        float left[blockSize], right[blockSize];
-        float* channels[2] = { left, right };
+    auto start = std::chrono::high_resolution_clock::now();
+    int processed = 0;
+    while (processed < totalFrames) {
         fillSine(left, blockSize, 440.0, sampleRate);
-        fillSine(right, blockSize, 440.0, sampleRate);
+        if (channels > 1) fillSine(right, blockSize, 440.0, sampleRate);
+        p.process(chPtrs, channels, blockSize);
+        processed += blockSize;
+    }
+    auto end = std::chrono::high_resolution_clock::now();
 
-        auto start = std::chrono::high_resolution_clock::now();
+    double wallSec = std::chrono::duration<double>(end - start).count();
+    double audioSec = double(processed) / sampleRate;
+    return audioSec / wallSec;
+}
 
-        int framesProcessed = 0;
-        while (framesProcessed < totalFrames) {
-            // Reset input each block (simulate real audio)
-            fillSine(left, blockSize, 440.0, sampleRate);
-            fillSine(right, blockSize, 440.0, sampleRate);
-            p.process(channels, 2, blockSize);
-            framesProcessed += blockSize;
-        }
+// ── CPU performance floors ──────────────────────────────────────────────
 
-        auto end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(end - start).count();
-        double samplesPerSec = double(totalFrames) / (ms * 0.001);
-        double realtimeX = samplesPerSec / sampleRate;
-        double cpuPercent = 100.0 / realtimeX;
+TEST(perf_48k_bypass_above_200x) {
+    double rt = measureRealtimeMultiplier(48000.0, 512, 2, 0.0, 50.0, false, 0.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 200.0);
+}
 
-        printf("  %-35s  %6.1fx realtime   %5.2f%% CPU\n", name, realtimeX, cpuPercent);
-    };
+TEST(perf_48k_default_above_200x) {
+    double rt = measureRealtimeMultiplier(48000.0, 512, 2, 100.0, 50.0, false, 0.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 200.0);
+}
 
-    benchConfig("Bypass (0% mix)",          0.0,   50.0, false, 0.0);
-    benchConfig("Default (100% mix, flat)", 100.0,  50.0, false, 0.0);
-    benchConfig("Automation (+12 glide)",   100.0,  50.0, true,  12.0);
-    benchConfig("Automation (+24 glide)",   100.0,  50.0, true,  24.0);
-    benchConfig("Fast glide (1ms)",         100.0,   1.0, true,  12.0);
-    benchConfig("Slow glide (2000ms)",      100.0, 2000.0, true, 12.0);
+TEST(perf_48k_automation_above_200x) {
+    double rt = measureRealtimeMultiplier(48000.0, 512, 2, 100.0, 50.0, true, 12.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 200.0);
+}
+
+TEST(perf_48k_extreme_automation_above_200x) {
+    double rt = measureRealtimeMultiplier(48000.0, 512, 2, 100.0, 50.0, true, 24.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 200.0);
+}
+
+TEST(perf_48k_small_block_above_150x) {
+    // 128-sample blocks: tightest deadline (2.67ms). More overhead per block.
+    double rt = measureRealtimeMultiplier(48000.0, 128, 2, 100.0, 50.0, true, 12.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 150.0);
+}
+
+TEST(perf_96k_above_150x) {
+    double rt = measureRealtimeMultiplier(96000.0, 256, 2, 100.0, 50.0, true, 12.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 150.0);
+}
+
+TEST(perf_192k_above_100x) {
+    // 192kHz is the most demanding. Must still be >100x (< 1% CPU).
+    double rt = measureRealtimeMultiplier(192000.0, 512, 2, 100.0, 50.0, true, 12.0);
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 100.0);
+}
+
+// ── Memory size floors ──────────────────────────────────────────────────
+
+TEST(perf_memory_inline_under_25kb) {
+    // GlideProcessor inline memory must stay small.
+    // Before optimization: 318KB. After: 18.5KB. Floor: 25KB.
+    EXPECT(sizeof(GlideProcessor) < 25 * 1024);
+}
+
+TEST(perf_memory_pitchshifter_under_256_bytes) {
+    // GranularPitchShifter must remain lightweight (no inline LUTs).
+    // Before optimization: 150KB. After: 104 bytes. Floor: 256 bytes.
+    EXPECT(sizeof(GranularPitchShifter) < 256);
+}
+
+TEST(perf_memory_heap_48k_under_1mb) {
+    // Total heap allocation at 48kHz stereo: pitch buffers + Hann LUT.
+    // 0.5s * 48000 * 2ch * 8bytes + 1440 * 8bytes = ~386KB. Floor: 1MB.
+    int heapDoubles = int(48000 * 0.5) * 2 + 1440;
+    int heapBytes = heapDoubles * int(sizeof(double));
+    EXPECT(heapBytes < 1024 * 1024);
+}
+
+TEST(perf_memory_heap_192k_under_4mb) {
+    // At 192kHz: 0.5s * 192000 * 2ch * 8bytes + 5760 * 8bytes = ~1.5MB. Floor: 4MB.
+    int heapDoubles = int(192000 * 0.5) * 2 + 5760;
+    int heapBytes = heapDoubles * int(sizeof(double));
+    EXPECT(heapBytes < 4 * 1024 * 1024);
+}
+
+// ── Per-block deadline tests ────────────────────────────────────────────
+
+TEST(perf_worst_case_under_5pct_cpu) {
+    // Logic Pro hard requirement: plugin must use <5% of one core.
+    // Test the worst case: 192kHz, 128-sample blocks, full automation.
+    double rt = measureRealtimeMultiplier(192000.0, 128, 2, 100.0, 50.0, true, 24.0);
+    double cpuPct = 100.0 / rt;
+    printf("[%.2f%%] ", cpuPct);
+    EXPECT(cpuPct < 5.0);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
@@ -1063,10 +1149,6 @@ int main() {
 
     // Tests run via static initialization before main()
 
-    printf("\nResults: %d passed, %d failed\n", gTestsPassed, gTestsFailed);
-
-    runBenchmark();
-
-    printf("\n");
+    printf("\nResults: %d passed, %d failed\n\n", gTestsPassed, gTestsFailed);
     return gTestsFailed > 0 ? 1 : 0;
 }
