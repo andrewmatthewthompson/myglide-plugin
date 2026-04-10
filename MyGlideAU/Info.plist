@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>MyGlideAU</string>
+    <key>CFBundleDisplayName</key>
+    <string>MyGlideAU</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.AudioUnit-UI</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>MyGlideAU.AudioUnitFactory</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>AudioComponents</key>
+            <array>
+                <dict>
+                    <key>type</key>
+                    <string>aufx</string>
+                    <key>subtype</key>
+                    <string>Gld1</string>
+                    <key>manufacturer</key>
+                    <string>Demo</string>
+                    <key>name</key>
+                    <string>MyGlide</string>
+                    <key>factoryFunction</key>
+                    <string>MyGlideAU.AudioUnitFactory</string>
+                    <key>description</key>
+                    <string>MyGlide AUv3 glide/portamento effect</string>
+                    <key>tags</key>
+                    <array>
+                        <string>Effects</string>
+                    </array>
+                    <key>version</key>
+                    <integer>65536</integer>
+                    <key>sandboxSafe</key>
+                    <true/>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,22 @@
+import CoreAudioKit
+import AVFoundation
+
+public class AudioUnitFactory: NSObject, AUAudioUnitFactory {
+
+    var auAudioUnit: GlideAudioUnit?
+
+    public func createAudioUnit(with componentDescription: AudioComponentDescription) throws -> AUAudioUnit {
+        let audioUnit = try GlideAudioUnit(componentDescription: componentDescription, options: [])
+        auAudioUnit = audioUnit
+        return audioUnit
+    }
+
+    public func requestViewController(completionHandler: @escaping (NSViewController?) -> Void) {
+        guard let audioUnit = auAudioUnit else {
+            completionHandler(nil)
+            return
+        }
+        let hostingController = NSHostingController(rootView: GlideMainView(audioUnit: audioUnit))
+        completionHandler(hostingController)
+    }
+}

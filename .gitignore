@@ -1,0 +1,17 @@
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+
+# Build artifacts
+*.o
+*.d
+
+# Test binaries
+Tests/test_glide
+Tests/bench_glide
+
+# macOS
+.DS_Store

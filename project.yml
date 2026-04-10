@@ -1,0 +1,70 @@
+name: MyGlide
+options:
+  bundleIdPrefix: com.myglide
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+
+targets:
+  MyGlide:
+    type: application
+    platform: macOS
+    sources:
+      - path: MyGlide
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.myglide.app
+        INFOPLIST_FILE: MyGlide/Info.plist
+        CODE_SIGN_ENTITLEMENTS: MyGlide/MyGlide.entitlements
+        PRODUCT_NAME: MyGlide
+    dependencies:
+      - target: MyGlideAU
+        embed: true
+        codeSign: true
+    postBuildScripts:
+      - name: "Auto-install (Debug only)"
+        script: |
+          if [ "${CONFIGURATION}" != "Debug" ]; then exit 0; fi
+          APP="${BUILT_PRODUCTS_DIR}/MyGlide.app"
+          DEST="/Applications/MyGlide.app"
+          if pgrep -xq "Logic Pro"; then
+            echo "warning: Logic Pro is running — close it before testing"
+          fi
+          rm -rf "$DEST"
+          cp -R "$APP" "$DEST"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R "$DEST"
+          echo "Installed to $DEST — In Logic: Audio FX → Audio Units → Demo → MyGlide"
+
+  MyGlideAU:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: MyGlideAU
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.myglide.app.au
+        INFOPLIST_FILE: MyGlideAU/Info.plist
+        CODE_SIGN_ENTITLEMENTS: MyGlideAU/MyGlideAU.entitlements
+        PRODUCT_NAME: MyGlideAU
+        SWIFT_OBJC_BRIDGING_HEADER: MyGlideAU/DSP/MyGlideAU-Bridging-Header.h
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
+    dependencies:
+      - framework: AudioToolbox.framework
+      - framework: AVFoundation.framework
+      - framework: CoreAudioKit.framework
+
+schemes:
+  MyGlide:
+    build:
+      targets:
+        MyGlide: all
+        MyGlideAU: all
+  MyGlideAU:
+    build:
+      targets:
+        MyGlideAU: all
