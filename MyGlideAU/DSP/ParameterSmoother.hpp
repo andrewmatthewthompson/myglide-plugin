@@ -15,6 +15,14 @@ public:
         mCurrent = mTarget.load(std::memory_order_relaxed);
     }
 
+    /// Update only the smoothing coefficient without resetting mCurrent.
+    /// Use this when changing the convergence rate mid-stream (e.g. glide time knob)
+    /// to avoid audible pitch discontinuities.
+    void updateCoefficient(double sampleRate, double convergenceMs) {
+        double samples = convergenceMs * 0.001 * sampleRate;
+        mCoeff = (samples > 0.0) ? std::exp(-1.0 / samples) : 0.0;
+    }
+
     void setTarget(double value) {
         mTarget.store(value, std::memory_order_relaxed);
     }

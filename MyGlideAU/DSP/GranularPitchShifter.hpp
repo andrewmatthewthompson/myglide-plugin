@@ -53,8 +53,13 @@ public:
     }
 
     /// Set pitch shift in semitones. 0 = no shift, +12 = octave up, -12 = octave down.
+    /// Clamped to ±48 semitones (4 octaves) to prevent buffer overrun from extreme ratios.
     /// Only recalculates pow() when the value actually changes (>0.001 threshold).
     void setPitchSemitones(double semitones) {
+        // Clamp to safe range — extreme ratios can cause readPos to escape buffer bounds
+        if (semitones > 48.0) semitones = 48.0;
+        if (semitones < -48.0) semitones = -48.0;
+
         if (std::fabs(semitones - mLastSemitones) > 0.001) {
             mPitchRatio = std::pow(2.0, semitones / 12.0);
             mLastSemitones = semitones;
@@ -82,11 +87,11 @@ public:
             if (lutIdx >= mGrainSamples) lutIdx = mGrainSamples - 1;
             double window = mHannLUT[lutIdx];
 
-            // Read position: write head minus age
+            // Read position: write head minus age, wrapped into [0, bufSize)
             double readPos = static_cast<double>(mWritePos) - grain.age;
-            // Conditional wrap (cheaper than fmod — readPos is in [-bufSize, +bufSize] range)
+            // Use fmod for safety — handles any magnitude (defensive against extreme ratios)
+            readPos = std::fmod(readPos, bufSize);
             if (readPos < 0.0) readPos += bufSize;
-            else if (readPos >= bufSize) readPos -= bufSize;
 
             // Cubic Hermite interpolation
             output += window * hermiteRead(readPos);

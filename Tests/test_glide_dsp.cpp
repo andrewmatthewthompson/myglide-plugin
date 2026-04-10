@@ -656,6 +656,326 @@ TEST(processor_mono_channel) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Bug-probing tests (targeted at specific crash/corruption scenarios)
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(bug_smoother_glide_time_change_no_pitch_jump) {
+    // Verify that changing glide time doesn't cause a pitch discontinuity.
+    // Before the fix, configure() reset mCurrent, snapping the pitch.
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 200.0f);  // start slow
+    p.setBeatPosition(0.0, 120.0);
+
+    // Set automation to +12 semitones
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    // Process until pitch smoother is partially converged
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0);   // 100ms
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    // Record output level at the boundary
+    float beforeChange = buf.left[4799];
+
+    // Now change glide time abruptly — this should NOT cause a pitch jump
+    p.setParameter(kGlideTime, 10.0f);
+    fillSine(buf.left, 100, 440.0, 48000.0);
+    fillSine(buf.right, 100, 440.0, 48000.0);
+    p.process(buf.channels, 2, 100);
+
+    float afterChange = buf.left[0];
+
+    // The output should be continuous — no huge jump
+    double jump = std::fabs(double(afterChange) - double(beforeChange));
+    EXPECT(jump < 0.5);  // less than 50% of full-scale jump
+}
+
+TEST(bug_pitcher_extreme_semitones_no_crash) {
+    // Before the fix, extreme semitone values caused readPos out of bounds.
+    const int N = 48000;
+    double buf[N];
+    GranularPitchShifter ps;
+    ps.configure(buf, N, 48000.0, 30.0);
+
+    // +48 semitones = 4 octaves up (ratio = 16) — at the clamp boundary
+    ps.setPitchSemitones(48.0);
+    float output[4800];
+    for (int i = 0; i < 4800; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    EXPECT(!hasInvalidSamples(output, 4800));
+}
+
+TEST(bug_pitcher_corrupted_semitones_clamped) {
+    // Simulates corrupted automation data with semitones = 1000
+    const int N = 48000;
+    double buf[N];
+    GranularPitchShifter ps;
+    ps.configure(buf, N, 48000.0, 30.0);
+
+    // This would have caused ratio = pow(2, 83.3) ≈ 1e25 before the clamp
+    ps.setPitchSemitones(1000.0);
+    float output[4800];
+    for (int i = 0; i < 4800; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    EXPECT(!hasInvalidSamples(output, 4800) && peakAbs(output, 4800) < 10.0);
+}
+
+TEST(bug_pitcher_negative_extreme_clamped) {
+    const int N = 48000;
+    double buf[N];
+    GranularPitchShifter ps;
+    ps.configure(buf, N, 48000.0, 30.0);
+
+    ps.setPitchSemitones(-1000.0);
+    float output[4800];
+    for (int i = 0; i < 4800; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    EXPECT(!hasInvalidSamples(output, 4800));
+}
+
+TEST(bug_pitcher_tiny_buffer) {
+    // Smallest reasonable buffer: 10 samples. Tests all wrapping edge cases.
+    double buf[10];
+    GranularPitchShifter ps;
+    ps.configure(buf, 10, 48000.0, 0.1);  // 0.1ms grain = ~5 samples
+
+    ps.setPitchSemitones(12.0);
+    float output[1000];
+    for (int i = 0; i < 1000; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    EXPECT(!hasInvalidSamples(output, 1000));
+}
+
+TEST(bug_pitcher_bufsize_1_no_crash) {
+    // Edge case: buffer of size 1. Hermite needs 4 samples, so wrapping is critical.
+    double buf[4];  // minimum viable size for Hermite
+    GranularPitchShifter ps;
+    ps.configure(buf, 4, 48000.0, 0.1);
+
+    ps.setPitchSemitones(0.0);
+    float output[100];
+    for (int i = 0; i < 100; ++i)
+        output[i] = float(ps.process(0.3));
+    EXPECT(!hasInvalidSamples(output, 100));
+}
+
+TEST(bug_curve_two_breakpoints_evaluate_at_exact_endpoints) {
+    // Binary search edge: evaluate exactly at breakpoint beats
+    AutomationCurve c;
+    c.beginEdit();
+    c.addBreakpoint(2.0, 5.0, InterpolationType::Linear);
+    c.addBreakpoint(6.0, 10.0, InterpolationType::Linear);
+    c.commitEdit();
+    c.swapIfPending();
+
+    EXPECT(std::fabs(c.evaluate(2.0) - 5.0) < 0.01);   // exactly at first
+    EXPECT(std::fabs(c.evaluate(6.0) - 10.0) < 0.01);  // exactly at last
+    EXPECT(std::fabs(c.evaluate(4.0) - 7.5) < 0.01);   // midpoint
+}
+
+TEST(bug_curve_three_breakpoints_boundary) {
+    // Three breakpoints: tests binary search with lo=0 hi=2 → mid=1
+    AutomationCurve c;
+    c.beginEdit();
+    c.addBreakpoint(0.0, 0.0, InterpolationType::Linear);
+    c.addBreakpoint(4.0, 12.0, InterpolationType::Linear);
+    c.addBreakpoint(8.0, 0.0, InterpolationType::Linear);
+    c.commitEdit();
+    c.swapIfPending();
+
+    // Verify each segment evaluates correctly
+    EXPECT(std::fabs(c.evaluate(1.0) - 3.0) < 0.01);    // segment 0-1
+    EXPECT(std::fabs(c.evaluate(4.0) - 12.0) < 0.01);   // at middle breakpoint
+    EXPECT(std::fabs(c.evaluate(6.0) - 6.0) < 0.01);    // segment 1-2
+}
+
+TEST(bug_curve_cache_invalidation_on_swap) {
+    // Verify that segment cache is invalidated when buffer is swapped
+    AutomationCurve c;
+    c.beginEdit();
+    c.addBreakpoint(0.0, 0.0, InterpolationType::Linear);
+    c.addBreakpoint(10.0, 10.0, InterpolationType::Linear);
+    c.commitEdit();
+    c.swapIfPending();
+
+    // Warm the cache at beat 5
+    EXPECT(std::fabs(c.evaluate(5.0) - 5.0) < 0.01);
+
+    // Change the curve — same beats but different values
+    c.beginEdit();
+    c.clearBreakpoints();
+    c.addBreakpoint(0.0, 100.0, InterpolationType::Linear);
+    c.addBreakpoint(10.0, 100.0, InterpolationType::Linear);
+    c.commitEdit();
+    c.swapIfPending();  // should invalidate cache
+
+    // If cache wasn't invalidated, we'd get stale segment data
+    double val = c.evaluate(5.0);
+    EXPECT(std::fabs(val - 100.0) < 0.01);
+}
+
+TEST(bug_processor_automation_with_corrupted_semitones) {
+    // Automation curve with out-of-range semitones — should not crash
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 500.0, InterpolationType::Linear);  // way out of range
+    curve->commitEdit();
+
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+    EXPECT(!hasInvalidSamples(buf.left, 48000));
+}
+
+TEST(bug_processor_zero_tempo) {
+    // tempo = 0 should not cause division by zero
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(5.0, 0.0);  // zero tempo
+
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+    EXPECT(!hasInvalidSamples(buf.left, 4800));
+    // Beat should not advance with zero tempo
+    EXPECT(std::fabs(p.currentBeatPosition() - 5.0) < 0.01);
+}
+
+TEST(bug_processor_negative_tempo) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(10.0, -120.0);  // negative tempo (shouldn't happen but defensive)
+
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+    EXPECT(!hasInvalidSamples(buf.left, 4800));
+}
+
+TEST(bug_processor_very_large_beat_position) {
+    // After hours of playback, beat position is very large
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(100000.0, 120.0);
+
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 0.0, InterpolationType::Linear);
+    curve->addBreakpoint(16.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+    EXPECT(!hasInvalidSamples(buf.left, 4800));
+}
+
+TEST(bug_smoother_update_coefficient_preserves_current) {
+    // Verify updateCoefficient doesn't reset mCurrent (the whole point of the fix)
+    ParameterSmoother s;
+    s.configure(48000.0, 100.0);
+    s.setTarget(100.0);
+
+    // Advance partway — mCurrent should be somewhere between 0 and 100
+    for (int i = 0; i < 480; ++i) s.next();  // 10ms
+    double midway = s.current();
+    EXPECT(midway > 5.0 && midway < 95.0);
+
+    // Update coefficient — mCurrent must NOT change
+    s.updateCoefficient(48000.0, 50.0);
+    double afterUpdate = s.current();
+    EXPECT(std::fabs(afterUpdate - midway) < 0.001);
+}
+
+TEST(bug_deserialize_truncated_data) {
+    // Deserialize with less data than count claims
+    AutomationCurve c;
+    c.beginEdit();
+
+    // Claim 100 breakpoints but only provide data for 2
+    uint8_t data[4 + 2 * 24];
+    int32_t fakeCount = 100;
+    std::memcpy(data, &fakeCount, 4);
+    // Fill 2 breakpoints
+    Breakpoint bp1 = { 1.0, 5.0, InterpolationType::Linear, {} };
+    Breakpoint bp2 = { 2.0, 10.0, InterpolationType::Linear, {} };
+    std::memcpy(data + 4, &bp1, 24);
+    std::memcpy(data + 28, &bp2, 24);
+
+    c.deserialize(data, sizeof(data));
+    c.commitEdit();
+    c.swapIfPending();
+
+    // Should only have 2 breakpoints (clamped by available data)
+    EXPECT(c.count() == 2);
+    EXPECT(std::fabs(c.evaluate(1.0) - 5.0) < 0.01);
+}
+
+TEST(bug_deserialize_negative_count) {
+    AutomationCurve c;
+    c.beginEdit();
+
+    uint8_t data[4];
+    int32_t negCount = -5;
+    std::memcpy(data, &negCount, 4);
+    c.deserialize(data, 4);
+    c.commitEdit();
+    c.swapIfPending();
+    EXPECT(c.count() == 0);
+}
+
+TEST(bug_deserialize_zero_length) {
+    AutomationCurve c;
+    c.beginEdit();
+    c.deserialize(nullptr, 0);
+    c.commitEdit();
+    c.swapIfPending();
+    EXPECT(c.count() == 0);
+}
+
+TEST(bug_serialize_too_small_buffer) {
+    AutomationCurve c;
+    c.beginEdit();
+    c.addBreakpoint(0.0, 5.0);
+    c.commitEdit();
+    c.swapIfPending();
+
+    // Buffer too small — should return 0 (not write past end)
+    uint8_t tiny[4];
+    int written = c.serialize(tiny, 4);  // needs 4 + 24 = 28 bytes
+    EXPECT(written == 0);
+}
+
+TEST(bug_processor_midi_channel_ignored) {
+    // MIDI events on different channels should all be processed (channel stripped)
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+
+    // Note on channel 1 (status 0x90) vs channel 10 (status 0x99)
+    p.handleMIDIEvent(0x99, 60, 100);  // channel 10
+    EXPECT((p.activeNoteBitmaskLo() & (1ULL << 60)) != 0);
+
+    p.handleMIDIEvent(0x89, 60, 0);    // note off channel 10
+    EXPECT((p.activeNoteBitmaskLo() & (1ULL << 60)) == 0);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Performance Benchmark
 // ══════════════════════════════════════════════════════════════════════════
 

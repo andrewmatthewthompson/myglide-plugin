@@ -144,10 +144,11 @@ public:
             const double wetGain = mix / 100.0;
             const double dryGain = 1.0 - wetGain;
 
-            // Reconfigure pitch smoother when glide time changes significantly
-            // (avoids calling exp() every sample — only when the knob moves)
+            // Update pitch smoother rate when glide time changes significantly.
+            // Uses updateCoefficient (not configure) to avoid resetting mCurrent,
+            // which would cause audible pitch discontinuities.
             if (std::fabs(glideTimeMs - mLastGlideTimeMs) > 0.5) {
-                mSmPitch.configure(mSampleRate, glideTimeMs);
+                mSmPitch.updateCoefficient(mSampleRate, glideTimeMs);
                 mLastGlideTimeMs = glideTimeMs;
             }
 

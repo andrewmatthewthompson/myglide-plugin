@@ -63,7 +63,9 @@ public:
 
     void automationClear() {
         auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
-        curve->beginEdit();
+        // No beginEdit() here — caller must have already called automationBeginEdit().
+        // Calling beginEdit() again would pick a potentially different write buffer,
+        // discarding any work done since the first beginEdit().
         curve->clearBreakpoints();
     }
 
