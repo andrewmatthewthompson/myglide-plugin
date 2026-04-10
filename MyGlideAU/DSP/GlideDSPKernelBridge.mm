@@ -33,50 +33,53 @@
     _kernel.setBeatPosition(beatPosition, tempo);
 }
 
-// ── Automation curve bridge methods ──────────────────────────────────────
+// ── Automation curve editing ─────────────────────────────────────────────
 
-- (void)automationBeginEdit {
-    _kernel.automationBeginEdit();
-}
+- (void)automationBeginEdit { _kernel.automationBeginEdit(); }
 
 - (void)automationAddBreakpointAtBeat:(double)beat semitones:(double)semitones interpType:(uint8_t)interpType {
     _kernel.automationAddBreakpoint(beat, semitones, interpType);
 }
 
-- (void)automationRemoveBreakpointAtIndex:(int)index {
-    _kernel.automationRemoveBreakpoint(index);
-}
+- (void)automationRemoveBreakpointAtIndex:(int)index { _kernel.automationRemoveBreakpoint(index); }
 
 - (void)automationMoveBreakpointAtIndex:(int)index toBeat:(double)beat semitones:(double)semitones {
     _kernel.automationMoveBreakpoint(index, beat, semitones);
 }
 
-- (void)automationClear {
-    _kernel.automationClear();
+- (void)automationClear { _kernel.automationClear(); }
+- (void)automationCommitEdit { _kernel.automationCommitEdit(); }
+
+// ── Automation serialization ─────────────────────────────────────────────
+
+- (NSData *)automationSerialize {
+    uint8_t buf[4 + 256 * 24];  // max: header + 256 breakpoints
+    int len = _kernel.automationSerialize(buf, sizeof(buf));
+    if (len <= 0) return [NSData data];
+    return [NSData dataWithBytes:buf length:len];
 }
 
-- (void)automationCommitEdit {
-    _kernel.automationCommitEdit();
+- (void)automationDeserializeFromData:(NSData *)data {
+    if (!data || data.length == 0) return;
+    _kernel.automationDeserialize(static_cast<const uint8_t *>(data.bytes), static_cast<int>(data.length));
 }
 
-- (uint64_t)activeNoteBitmaskLo {
-    return _kernel.activeNoteBitmaskLo();
+- (int)automationBreakpointCount {
+    return _kernel.automationBreakpointCount();
 }
 
-- (uint64_t)activeNoteBitmaskHi {
-    return _kernel.activeNoteBitmaskHi();
+- (void)automationBreakpointAtIndex:(int)index beat:(double *)beat semitones:(double *)semitones interpType:(uint8_t *)interpType {
+    _kernel.automationBreakpointAt(index, beat, semitones, interpType);
 }
 
-- (double)currentBeatPosition {
-    return _kernel.currentBeatPosition();
-}
+// ── Display state ────────────────────────────────────────────────────────
 
-- (int32_t)latencySamples {
-    return _kernel.latencySamples();
-}
+- (uint64_t)activeNoteBitmaskLo { return _kernel.activeNoteBitmaskLo(); }
+- (uint64_t)activeNoteBitmaskHi { return _kernel.activeNoteBitmaskHi(); }
+- (double)currentBeatPosition { return _kernel.currentBeatPosition(); }
+- (double)currentPitchSemitones { return _kernel.currentPitchSemitones(); }
 
-- (double)tailTimeSeconds {
-    return _kernel.tailTimeSeconds();
-}
+- (int32_t)latencySamples { return _kernel.latencySamples(); }
+- (double)tailTimeSeconds { return _kernel.tailTimeSeconds(); }
 
 @end

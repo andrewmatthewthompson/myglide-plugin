@@ -990,6 +990,84 @@ TEST(bug_processor_midi_channel_ignored) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Serialization through processor (preset save/load)
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(processor_serialize_deserialize_roundtrip) {
+    // Simulate a full preset save/load cycle through the processor
+    GlideProcessor src;
+    src.setUp(2, 48000.0);
+    src.setBeatPosition(0.0, 120.0);
+
+    // Add breakpoints via the curve pointer (simulating UI edits)
+    // Note: interpolation type on a breakpoint controls the segment AFTER it
+    auto* srcCurve = static_cast<AutomationCurve*>(src.automationCurvePtr());
+    srcCurve->beginEdit();
+    srcCurve->addBreakpoint(0.0, 0.0, InterpolationType::Smooth);  // segment 0→4: smooth
+    srcCurve->addBreakpoint(4.0, 12.0, InterpolationType::Linear);  // segment 4→8: linear
+    srcCurve->addBreakpoint(8.0, -7.0, InterpolationType::Step);    // segment 8→12: step
+    srcCurve->addBreakpoint(12.0, 3.5, InterpolationType::Linear);
+    srcCurve->commitEdit();
+    srcCurve->swapIfPending();
+
+    // Serialize
+    uint8_t data[8192];
+    int len = srcCurve->serialize(data, sizeof(data));
+    EXPECT(len > 0);
+
+    // Deserialize into a fresh processor (simulating Logic Pro reopening a session)
+    GlideProcessor dst;
+    dst.setUp(2, 48000.0);
+    auto* dstCurve = static_cast<AutomationCurve*>(dst.automationCurvePtr());
+    dstCurve->beginEdit();
+    dstCurve->deserialize(data, len);
+    dstCurve->commitEdit();
+    dstCurve->swapIfPending();
+
+    // Verify all breakpoint values survived the roundtrip
+    EXPECT(std::fabs(dstCurve->evaluate(0.0) - 0.0) < 0.01);
+    EXPECT(std::fabs(dstCurve->evaluate(4.0) - 12.0) < 0.01);
+    EXPECT(std::fabs(dstCurve->evaluate(8.0) - (-7.0)) < 0.01);
+    EXPECT(std::fabs(dstCurve->evaluate(12.0) - 3.5) < 0.01);
+
+    // Verify interpolation types: smooth between 0→4 should differ from linear
+    double smoothMid = dstCurve->evaluate(2.0);
+    double linearMid = 0.0 + (12.0 - 0.0) * 0.5;  // would be 6.0 for linear
+    EXPECT(std::fabs(smoothMid - linearMid) < 0.01);  // at midpoint, smooth == linear
+    double smoothQuarter = dstCurve->evaluate(1.0);
+    EXPECT(std::fabs(smoothQuarter - 3.0) > 0.1);  // but off-center they differ
+
+    // Verify step: between 8 and 12, step holds -7.0
+    EXPECT(std::fabs(dstCurve->evaluate(10.0) - (-7.0)) < 0.01);
+}
+
+TEST(processor_display_pitch_updates) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Add +12 automation
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    // Process enough for smoother to converge
+    StereoBuffer buf;
+    for (int i = 0; i < 3; ++i) {
+        fillSine(buf.left, 48000, 440.0, 48000.0);
+        fillSine(buf.right, 48000, 440.0, 48000.0);
+        p.process(buf.channels, 2, 48000);
+    }
+
+    // Display pitch should be close to 12.0
+    double pitch = p.currentPitchSemitones();
+    EXPECT(std::fabs(pitch - 12.0) < 1.0);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Latency, Tail Time, and Bypass Tests
 // ══════════════════════════════════════════════════════════════════════════
 

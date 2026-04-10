@@ -77,9 +77,40 @@ public:
     uint64_t activeNoteBitmaskLo() const { return mProcessor.activeNoteBitmaskLo(); }
     uint64_t activeNoteBitmaskHi() const { return mProcessor.activeNoteBitmaskHi(); }
     double currentBeatPosition() const { return mProcessor.currentBeatPosition(); }
+    double currentPitchSemitones() const { return mProcessor.currentPitchSemitones(); }
 
     int32_t latencySamples() const { return mProcessor.latencySamples(); }
     double tailTimeSeconds() const { return mProcessor.tailTimeSeconds(); }
+
+    // ── Serialization (for preset save/load) ─────────────────────────────
+
+    int automationSerialize(uint8_t* out, int maxBytes) {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        return curve->serialize(out, maxBytes);
+    }
+
+    void automationDeserialize(const uint8_t* data, int length) {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        curve->beginEdit();
+        curve->deserialize(data, length);
+        curve->commitEdit();
+    }
+
+    int automationBreakpointCount() {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        return curve->count();
+    }
+
+    void automationBreakpointAt(int index, double* beat, double* semitones, uint8_t* interpType) {
+        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        const Breakpoint* pts = nullptr;
+        int count = curve->getBreakpoints(&pts);
+        if (index >= 0 && index < count && pts) {
+            *beat = pts[index].beat;
+            *semitones = pts[index].semitones;
+            *interpType = static_cast<uint8_t>(pts[index].interp);
+        }
+    }
 
 private:
     GlideProcessor mProcessor;

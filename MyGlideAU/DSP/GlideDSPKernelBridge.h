@@ -15,7 +15,7 @@
 // Musical context
 - (void)setBeatPosition:(double)beatPosition tempo:(double)tempo;
 
-// Automation curve manipulation (proper bridge — no raw pointers from Swift)
+// Automation curve manipulation
 - (void)automationBeginEdit;
 - (void)automationAddBreakpointAtBeat:(double)beat semitones:(double)semitones interpType:(uint8_t)interpType;
 - (void)automationRemoveBreakpointAtIndex:(int)index;
@@ -23,12 +23,19 @@
 - (void)automationClear;
 - (void)automationCommitEdit;
 
-// Active note bitmask (for UI display)
+// Automation serialization (for preset save/load)
+- (NSData *)automationSerialize;
+- (void)automationDeserializeFromData:(NSData *)data;
+- (int)automationBreakpointCount;
+- (void)automationBreakpointAtIndex:(int)index beat:(double *)beat semitones:(double *)semitones interpType:(uint8_t *)interpType;
+
+// Display state (for UI)
 - (uint64_t)activeNoteBitmaskLo;
 - (uint64_t)activeNoteBitmaskHi;
 - (double)currentBeatPosition;
+- (double)currentPitchSemitones;
 
-// Latency and tail time (for Logic Pro PDC and offline bounce)
+// Latency and tail time
 - (int32_t)latencySamples;
 - (double)tailTimeSeconds;
 

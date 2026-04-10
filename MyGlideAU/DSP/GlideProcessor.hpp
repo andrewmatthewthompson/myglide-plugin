@@ -183,8 +183,9 @@ public:
             beatPos += beatsPerSample;
         }
 
-        // Store updated beat position for next block
+        // Store updated beat position and display pitch for next block / UI
         mBeatPosition.store(beatPos, std::memory_order_relaxed);
+        mDisplayPitch.store(mSmPitch.current(), std::memory_order_relaxed);
     }
 
     // ── Accessors for UI ─────────────────────────────────────────────────
@@ -206,10 +207,13 @@ public:
     int32_t latencySamples() const { return mGrainSamples; }
 
     /// Tail time in seconds: how long audio rings out after input stops.
-    /// The pitch shifter grains can produce output for up to one grain duration
-    /// after the last input sample.
     double tailTimeSeconds() const {
         return (mSampleRate > 0.0) ? (double(mGrainSamples) / mSampleRate) : 0.0;
+    }
+
+    /// Current smoothed pitch shift in semitones (for UI display).
+    double currentPitchSemitones() const {
+        return mDisplayPitch.load(std::memory_order_relaxed);
     }
 
 private:
@@ -242,4 +246,7 @@ private:
     // Transport
     std::atomic<double> mBeatPosition{0.0};
     std::atomic<double> mTempo{120.0};
+
+    // Display (written once per block by audio thread, read by UI timer)
+    std::atomic<double> mDisplayPitch{0.0};
 };

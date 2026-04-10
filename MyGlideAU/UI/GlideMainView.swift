@@ -11,10 +11,10 @@ private func noteName(midi: Int) -> String {
     return "\(name)\(octave)"
 }
 
-// MARK: - Automation State (shared between UI and DSP)
+// MARK: - Automation State
 
-/// Bridges the C++ AutomationCurve to SwiftUI via proper Obj-C++ bridge methods.
-/// No raw pointer manipulation — all curve edits go through the bridge.
+/// Bridges the C++ AutomationCurve to SwiftUI via Obj-C++ bridge methods.
+/// Includes undo/redo, beat snapping, and preset restore support.
 class AutomationState: ObservableObject {
     struct UIBreakpoint: Identifiable {
         let id = UUID()
@@ -24,44 +24,104 @@ class AutomationState: ObservableObject {
     }
 
     @Published var breakpoints: [UIBreakpoint] = []
-    @Published var interpolationMode: Int = 0  // 0=linear, 1=smooth, 2=step
+    @Published var interpolationMode: Int = 0
     @Published var snapEnabled: Bool = true
+    @Published var beatSnapDivision: Double = 0.25  // 0=free, 1.0=1/4, 0.5=1/8, 0.25=1/16
+    @Published var canUndo: Bool = false
+    @Published var canRedo: Bool = false
 
     private weak var kernelBridge: GlideDSPKernelBridge?
+    private var undoStack: [[UIBreakpoint]] = []
+    private var redoStack: [[UIBreakpoint]] = []
+    private let maxUndoLevels = 50
+    private var dragUndoPushed = false
 
     func attach(to bridge: GlideDSPKernelBridge) {
         kernelBridge = bridge
     }
 
+    // MARK: - Beat Snap
+
+    private func snapBeat(_ beat: Double) -> Double {
+        guard snapEnabled && beatSnapDivision > 0 else { return beat }
+        return (beat / beatSnapDivision).rounded() * beatSnapDivision
+    }
+
+    // MARK: - Undo/Redo
+
+    private func pushUndo() {
+        undoStack.append(breakpoints)
+        if undoStack.count > maxUndoLevels { undoStack.removeFirst() }
+        redoStack.removeAll()
+        canUndo = true
+        canRedo = false
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(breakpoints)
+        breakpoints = previous
+        canUndo = !undoStack.isEmpty
+        canRedo = true
+        commitToDSP()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(breakpoints)
+        breakpoints = next
+        canUndo = true
+        canRedo = !redoStack.isEmpty
+        commitToDSP()
+    }
+
+    func beginDrag() {
+        if !dragUndoPushed {
+            pushUndo()
+            dragUndoPushed = true
+        }
+    }
+
+    func endDrag() {
+        dragUndoPushed = false
+    }
+
+    // MARK: - Editing
+
     func addBreakpoint(beat: Double, semitones: Double) {
-        let snapped = snapEnabled ? semitones.rounded() : semitones
-        let bp = UIBreakpoint(beat: beat, semitones: snapped, interpType: interpolationMode)
-        breakpoints.append(bp)
+        pushUndo()
+        let snappedBeat = snapBeat(beat)
+        let snappedSemi = snapEnabled ? semitones.rounded() : semitones
+        breakpoints.append(UIBreakpoint(beat: snappedBeat, semitones: snappedSemi, interpType: interpolationMode))
         breakpoints.sort { $0.beat < $1.beat }
         commitToDSP()
     }
 
     func moveBreakpoint(index: Int, beat: Double, semitones: Double) {
         guard index >= 0 && index < breakpoints.count else { return }
-        let snapped = snapEnabled ? semitones.rounded() : semitones
-        breakpoints[index].beat = max(0, beat)
-        breakpoints[index].semitones = snapped
+        let snappedBeat = snapBeat(beat)
+        let snappedSemi = snapEnabled ? semitones.rounded() : semitones
+        breakpoints[index].beat = max(0, snappedBeat)
+        breakpoints[index].semitones = snappedSemi
         breakpoints.sort { $0.beat < $1.beat }
         commitToDSP()
     }
 
     func removeBreakpoint(index: Int) {
         guard index >= 0 && index < breakpoints.count else { return }
+        pushUndo()
         breakpoints.remove(at: index)
         commitToDSP()
     }
 
     func clearAll() {
+        pushUndo()
         breakpoints.removeAll()
         commitToDSP()
     }
 
     func setInterpolationMode(_ mode: Int) {
+        pushUndo()
         interpolationMode = mode
         for i in breakpoints.indices {
             breakpoints[i].interpType = mode
@@ -69,21 +129,32 @@ class AutomationState: ObservableObject {
         commitToDSP()
     }
 
-    /// Push breakpoints to the C++ triple-buffer via proper bridge methods.
+    // MARK: - Preset Restore
+
+    func restoreFromDSP() {
+        guard let bridge = kernelBridge else { return }
+        let count = bridge.automationBreakpointCount()
+        breakpoints.removeAll()
+        for i in 0..<count {
+            var beat: Double = 0, semi: Double = 0, interp: UInt8 = 0
+            bridge.automationBreakpoint(atIndex: Int32(i), beat: &beat, semitones: &semi, interpType: &interp)
+            breakpoints.append(UIBreakpoint(beat: beat, semitones: semi, interpType: Int(interp)))
+        }
+        undoStack.removeAll()
+        redoStack.removeAll()
+        canUndo = false
+        canRedo = false
+    }
+
+    // MARK: - DSP Commit
+
     private func commitToDSP() {
         guard let bridge = kernelBridge else { return }
-
         bridge.automationBeginEdit()
         bridge.automationClear()
-
         for bp in breakpoints {
-            bridge.automationAddBreakpoint(
-                atBeat: bp.beat,
-                semitones: bp.semitones,
-                interpType: UInt8(bp.interpType)
-            )
+            bridge.automationAddBreakpoint(atBeat: bp.beat, semitones: bp.semitones, interpType: UInt8(bp.interpType))
         }
-
         bridge.automationCommitEdit()
     }
 }
@@ -141,13 +212,16 @@ struct GlideMainView: View {
     // Display state
     @State private var activeNoteMask: (UInt64, UInt64) = (0, 0)
     @State private var playheadBeat: Double = 0.0
+    @State private var currentPitch: Double = 0.0
     @State private var displayTimer: Timer?
 
-    // View range
-    @State private var viewBeats: Double = 16.0       // 4 bars visible
+    // View range (zoom/scroll)
+    @State private var viewBeats: Double = 16.0
     @State private var viewStartBeat: Double = 0.0
-    @State private var noteRangeLow: Int = 48          // C3
-    @State private var noteRangeHigh: Int = 72         // C5
+    @State private var baseViewBeats: Double = 16.0    // for pinch gesture
+    @State private var basePanStart: Double = 0.0      // for pan gesture
+    @State private var noteRangeLow: Int = 48
+    @State private var noteRangeHigh: Int = 72
 
     var body: some View {
         ZStack {
@@ -169,9 +243,23 @@ struct GlideMainView: View {
             }
         }
         .frame(width: 700, height: 500)
+        .background(
+            // Hidden buttons for keyboard shortcuts (Cmd+Z, Cmd+Shift+Z)
+            Group {
+                Button("") { automation.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                Button("") { automation.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+            .frame(width: 0, height: 0)
+            .opacity(0)
+        )
         .onAppear {
             params.attach(to: audioUnit)
             automation.attach(to: audioUnit.kernel)
+            audioUnit.onStateRestored = { [weak automation] in
+                automation?.restoreFromDSP()
+            }
             startDisplayTimer()
         }
         .onDisappear { displayTimer?.invalidate() }
@@ -180,37 +268,76 @@ struct GlideMainView: View {
     // MARK: - Controls Bar
 
     private var controlsBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Text("MYGLIDE")
                 .font(.system(size: 14, weight: .bold, design: .monospaced))
                 .foregroundColor(.white)
 
             Divider().frame(height: 20).background(Color.white.opacity(0.3))
 
+            // Undo/Redo
+            Button(action: { automation.undo() }) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(automation.canUndo ? .white : .white.opacity(0.2))
+            .disabled(!automation.canUndo)
+
+            Button(action: { automation.redo() }) {
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(automation.canRedo ? .white : .white.opacity(0.2))
+            .disabled(!automation.canRedo)
+
+            Divider().frame(height: 20).background(Color.white.opacity(0.3))
+
+            // Interpolation mode
             Picker("", selection: $automation.interpolationMode) {
                 Text("Linear").tag(0)
                 Text("Smooth").tag(1)
                 Text("Step").tag(2)
             }
             .pickerStyle(.segmented)
-            .frame(width: 180)
+            .frame(width: 160)
             .onChange(of: automation.interpolationMode) { newVal in
                 automation.setInterpolationMode(newVal)
             }
 
+            // Snap + beat grid
             Toggle("Snap", isOn: $automation.snapEnabled)
                 .toggleStyle(.checkbox)
                 .foregroundColor(.white.opacity(0.8))
                 .font(.system(size: 11))
 
-            Button("Clear") {
-                automation.clearAll()
+            if automation.snapEnabled {
+                Picker("", selection: $automation.beatSnapDivision) {
+                    Text("1/4").tag(1.0)
+                    Text("1/8").tag(0.5)
+                    Text("1/16").tag(0.25)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 100)
             }
-            .buttonStyle(.borderless)
-            .foregroundColor(.red.opacity(0.8))
-            .font(.system(size: 11, weight: .medium))
+
+            Button("Clear") { automation.clearAll() }
+                .buttonStyle(.borderless)
+                .foregroundColor(.red.opacity(0.8))
+                .font(.system(size: 11, weight: .medium))
 
             Spacer()
+
+            // Pitch indicator
+            HStack(spacing: 4) {
+                Text("PITCH")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.5))
+                Text(String(format: "%+.1f st", currentPitch))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(abs(currentPitch) < 0.1 ? .white.opacity(0.5) : .cyan)
+            }
 
             HStack(spacing: 4) {
                 Text("MIX")
@@ -230,7 +357,7 @@ struct GlideMainView: View {
                     .foregroundColor(.white)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 8)
         .background(Color(red: 0.10, green: 0.12, blue: 0.18))
     }
 
@@ -292,7 +419,7 @@ struct GlideMainView: View {
                     drawGrid(context: context, size: canvasSize, noteCount: noteCount)
                     drawCurves(context: context, size: canvasSize, pitchRange: pitchRange)
                     drawBreakpoints(context: context, size: canvasSize, pitchRange: pitchRange)
-                    drawPlayhead(context: context, size: canvasSize)
+                    drawPlayhead(context: context, size: canvasSize, pitchRange: pitchRange)
                 }
 
                 // Click to add, drag to move
@@ -313,10 +440,28 @@ struct GlideMainView: View {
                         DragGesture(minimumDistance: 5)
                             .onChanged { value in
                                 if let idx = nearestBreakpointIndex(at: value.startLocation, size: size, pitchRange: pitchRange, threshold: 12) {
+                                    automation.beginDrag()
                                     let beat = xToBeat(value.location.x, width: size.width)
                                     let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
                                     automation.moveBreakpoint(index: idx, beat: beat, semitones: semi)
                                 }
+                            }
+                            .onEnded { _ in
+                                automation.endDrag()
+                            }
+                    )
+
+                // Pinch-to-zoom
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        MagnifyGesture()
+                            .onChanged { value in
+                                let newBeats = baseViewBeats / value.magnification
+                                viewBeats = max(4.0, min(64.0, newBeats))
+                            }
+                            .onEnded { _ in
+                                baseViewBeats = viewBeats
                             }
                     )
 
@@ -337,7 +482,7 @@ struct GlideMainView: View {
         }
     }
 
-    // MARK: - Beat Ruler
+    // MARK: - Beat Ruler (drag to pan)
 
     private var beatRuler: some View {
         GeometryReader { geo in
@@ -347,23 +492,45 @@ struct GlideMainView: View {
                 HStack(spacing: 0) {
                     Spacer().frame(width: 50)
                     Canvas { context, size in
-                        let beatsVisible = viewBeats
-                        for i in 0...Int(beatsVisible) {
-                            let beat = viewStartBeat + Double(i)
-                            let x = CGFloat(i) / CGFloat(beatsVisible) * size.width
+                        // Adaptive tick density based on zoom level
+                        let tickInterval: Double
+                        if viewBeats <= 8 { tickInterval = 0.25 }
+                        else if viewBeats <= 16 { tickInterval = 0.5 }
+                        else if viewBeats <= 32 { tickInterval = 1.0 }
+                        else { tickInterval = 2.0 }
 
+                        let firstTick = (viewStartBeat / tickInterval).rounded(.up) * tickInterval
+                        var tick = firstTick
+                        while tick <= viewStartBeat + viewBeats {
+                            let x = beatToX(tick, width: size.width)
+                            let isBar = tick.truncatingRemainder(dividingBy: 4) == 0
+                            let isBeat = tick.truncatingRemainder(dividingBy: 1) == 0
+
+                            let height: CGFloat = isBar ? 8 : (isBeat ? 5 : 3)
                             context.stroke(
-                                Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: 6)) },
-                                with: .color(.white.opacity(beat.truncatingRemainder(dividingBy: 4) == 0 ? 0.6 : 0.3)),
+                                Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: height)) },
+                                with: .color(.white.opacity(isBar ? 0.6 : 0.3)),
                                 lineWidth: 0.5
                             )
 
-                            if i < Int(beatsVisible) {
-                                let text = Text("\(Int(beat) + 1)").font(.system(size: 9, design: .monospaced))
-                                context.draw(text, at: CGPoint(x: x + 8, y: 14))
+                            if isBeat {
+                                let text = Text("\(Int(tick) + 1)").font(.system(size: 9, design: .monospaced))
+                                context.draw(text, at: CGPoint(x: x + 8, y: 16))
                             }
+
+                            tick += tickInterval
                         }
                     }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                let beatDelta = Double(value.translation.width / (geo.size.width - 50)) * viewBeats
+                                viewStartBeat = max(0, basePanStart - beatDelta)
+                            }
+                            .onEnded { _ in
+                                basePanStart = viewStartBeat
+                            }
+                    )
                 }
             }
         }
@@ -374,6 +541,7 @@ struct GlideMainView: View {
     private func drawGrid(context: GraphicsContext, size: CGSize, noteCount: Int) {
         let noteHeight = size.height / CGFloat(noteCount)
 
+        // Horizontal note lines
         for i in 0...noteCount {
             let y = CGFloat(i) * noteHeight
             let midi = noteRangeHigh - i
@@ -385,16 +553,41 @@ struct GlideMainView: View {
             )
         }
 
-        let beatsVisible = viewBeats
-        for i in 0...Int(beatsVisible) {
-            let x = CGFloat(i) / CGFloat(beatsVisible) * size.width
-            let beat = viewStartBeat + Double(i)
-            let isBar = beat.truncatingRemainder(dividingBy: 4) == 0
+        // Adaptive vertical beat grid
+        let tickInterval: Double
+        if viewBeats <= 8 { tickInterval = 0.25 }
+        else if viewBeats <= 16 { tickInterval = 0.5 }
+        else if viewBeats <= 32 { tickInterval = 1.0 }
+        else { tickInterval = 2.0 }
+
+        let firstTick = (viewStartBeat / tickInterval).rounded(.up) * tickInterval
+        var tick = firstTick
+        while tick <= viewStartBeat + viewBeats {
+            let x = beatToX(tick, width: size.width)
+            let isBar = tick.truncatingRemainder(dividingBy: 4) == 0
+            let isBeat = tick.truncatingRemainder(dividingBy: 1) == 0
             context.stroke(
                 Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
-                with: .color(.white.opacity(isBar ? 0.2 : 0.06)),
+                with: .color(.white.opacity(isBar ? 0.2 : (isBeat ? 0.08 : 0.04))),
                 lineWidth: isBar ? 0.5 : 0.25
             )
+            tick += tickInterval
+        }
+
+        // Beat snap grid overlay
+        if automation.snapEnabled && automation.beatSnapDivision > 0 && automation.beatSnapDivision < tickInterval {
+            let snap = automation.beatSnapDivision
+            let firstSnap = (viewStartBeat / snap).rounded(.up) * snap
+            var snapBeat = firstSnap
+            while snapBeat <= viewStartBeat + viewBeats {
+                let x = beatToX(snapBeat, width: size.width)
+                context.stroke(
+                    Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
+                    with: .color(Color.cyan.opacity(0.06)),
+                    lineWidth: 0.25
+                )
+                snapBeat += snap
+            }
         }
     }
 
@@ -438,16 +631,27 @@ struct GlideMainView: View {
         }
     }
 
-    private func drawPlayhead(context: GraphicsContext, size: CGSize) {
+    private func drawPlayhead(context: GraphicsContext, size: CGSize, pitchRange: Double) {
         let beat = playheadBeat
         if beat < viewStartBeat || beat > viewStartBeat + viewBeats { return }
 
         let x = beatToX(beat, width: size.width)
+
+        // Playhead line
         context.stroke(
             Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
             with: .color(.white.opacity(0.6)),
             lineWidth: 1.0
         )
+
+        // Pitch dot on the curve at playhead position
+        if abs(currentPitch) > 0.01 {
+            let pitchY = semitonesToY(currentPitch, height: size.height, range: pitchRange)
+            context.fill(
+                Path(ellipseIn: CGRect(x: x - 4, y: pitchY - 4, width: 8, height: 8)),
+                with: .color(.white)
+            )
+        }
     }
 
     // MARK: - Coordinate Conversion
@@ -539,6 +743,7 @@ struct GlideMainView: View {
                 audioUnit.kernel.activeNoteBitmaskHi()
             )
             playheadBeat = audioUnit.kernel.currentBeatPosition()
+            currentPitch = audioUnit.kernel.currentPitchSemitones()
         }
     }
 }
