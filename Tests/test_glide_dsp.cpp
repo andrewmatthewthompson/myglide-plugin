@@ -78,6 +78,20 @@ static void fillSine(float* buf, int n, double freq, double sampleRate, double a
         buf[i] = float(amplitude * std::sin(2.0 * M_PI * freq * i / sampleRate));
 }
 
+/// Helper: configure a GranularPitchShifter with self-contained Hann LUT.
+/// hannBuf must have at least grainSamples doubles.
+static void configurePitchShifter(GranularPitchShifter& ps,
+                                  double* circBuf, int32_t circSize,
+                                  double* hannBuf, double sampleRate, double grainMs = 30.0) {
+    int32_t grainSamples = static_cast<int32_t>(grainMs * 0.001 * sampleRate);
+    if (grainSamples < 4) grainSamples = 4;
+    for (int32_t i = 0; i < grainSamples; ++i) {
+        double phase = static_cast<double>(i) / static_cast<double>(grainSamples);
+        hannBuf[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+    }
+    ps.configure(circBuf, circSize, hannBuf, grainSamples, sampleRate);
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // AutomationCurve Tests
 // ══════════════════════════════════════════════════════════════════════════
@@ -313,9 +327,9 @@ TEST(curve_breakpoint_struct_size) {
 
 TEST(pitcher_passthrough_at_zero_semitones) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(0.0);
 
     float input[4800], output[4800];
@@ -330,9 +344,9 @@ TEST(pitcher_passthrough_at_zero_semitones) {
 
 TEST(pitcher_zero_semitones_preserves_440hz) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(0.0);
 
     float output[48000];
@@ -347,9 +361,9 @@ TEST(pitcher_zero_semitones_preserves_440hz) {
 
 TEST(pitcher_octave_up) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(12.0);
 
     float output[48000];
@@ -363,9 +377,9 @@ TEST(pitcher_octave_up) {
 
 TEST(pitcher_no_invalid_samples) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(7.0);
 
     float output[48000];
@@ -376,9 +390,9 @@ TEST(pitcher_no_invalid_samples) {
 
 TEST(pitcher_no_runaway) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(24.0);
 
     float output[48000];
@@ -389,9 +403,9 @@ TEST(pitcher_no_runaway) {
 
 TEST(pitcher_negative_semitones) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(-12.0);
 
     float output[48000];
@@ -405,9 +419,9 @@ TEST(pitcher_negative_semitones) {
 TEST(pitcher_rapid_pitch_changes) {
     // Sweep pitch from -24 to +24 semitones over 1 second — no crashes or NaN
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
 
     float output[48000];
     for (int i = 0; i < 48000; ++i) {
@@ -420,9 +434,9 @@ TEST(pitcher_rapid_pitch_changes) {
 
 TEST(pitcher_silence_stays_silent) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
     ps.setPitchSemitones(12.0);
 
     float output[4800];
@@ -699,9 +713,9 @@ TEST(bug_smoother_glide_time_change_no_pitch_jump) {
 TEST(bug_pitcher_extreme_semitones_no_crash) {
     // Before the fix, extreme semitone values caused readPos out of bounds.
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
 
     // +48 semitones = 4 octaves up (ratio = 16) — at the clamp boundary
     ps.setPitchSemitones(48.0);
@@ -714,9 +728,9 @@ TEST(bug_pitcher_extreme_semitones_no_crash) {
 TEST(bug_pitcher_corrupted_semitones_clamped) {
     // Simulates corrupted automation data with semitones = 1000
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
 
     // This would have caused ratio = pow(2, 83.3) ≈ 1e25 before the clamp
     ps.setPitchSemitones(1000.0);
@@ -728,9 +742,9 @@ TEST(bug_pitcher_corrupted_semitones_clamped) {
 
 TEST(bug_pitcher_negative_extreme_clamped) {
     const int N = 48000;
-    double buf[N];
+    double buf[N]; double hann[1440];
     GranularPitchShifter ps;
-    ps.configure(buf, N, 48000.0, 30.0);
+    configurePitchShifter(ps, buf, N, hann, 48000.0);
 
     ps.setPitchSemitones(-1000.0);
     float output[4800];
@@ -741,9 +755,9 @@ TEST(bug_pitcher_negative_extreme_clamped) {
 
 TEST(bug_pitcher_tiny_buffer) {
     // Smallest reasonable buffer: 10 samples. Tests all wrapping edge cases.
-    double buf[10];
+    double buf[10]; double hann[8];
     GranularPitchShifter ps;
-    ps.configure(buf, 10, 48000.0, 0.1);  // 0.1ms grain = ~5 samples
+    configurePitchShifter(ps, buf, 10, hann, 48000.0, 0.1);  // 0.1ms grain = ~5 samples
 
     ps.setPitchSemitones(12.0);
     float output[1000];
@@ -753,10 +767,10 @@ TEST(bug_pitcher_tiny_buffer) {
 }
 
 TEST(bug_pitcher_bufsize_1_no_crash) {
-    // Edge case: buffer of size 1. Hermite needs 4 samples, so wrapping is critical.
-    double buf[4];  // minimum viable size for Hermite
+    // Edge case: buffer of size 4. Hermite needs 4 samples, so wrapping is critical.
+    double buf[4]; double hann[8];
     GranularPitchShifter ps;
-    ps.configure(buf, 4, 48000.0, 0.1);
+    configurePitchShifter(ps, buf, 4, hann, 48000.0, 0.1);
 
     ps.setPitchSemitones(0.0);
     float output[100];

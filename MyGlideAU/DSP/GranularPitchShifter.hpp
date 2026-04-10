@@ -11,30 +11,30 @@
 ///   - Continuous semitone control for glide automation
 ///   - Cached pitch ratio to avoid pow() per-sample
 ///
-/// RT-safe: uses pre-allocated external buffer, no allocations in process().
+/// Memory model: all buffers (circular + Hann LUT) are external pointers into
+/// a contiguous block owned by the parent GlideProcessor. The class itself is
+/// only ~96 bytes — no large inline arrays.
+///
+/// RT-safe: no allocations in process().
 class GranularPitchShifter {
 public:
     GranularPitchShifter() = default;
 
-    // Non-copyable: holds a non-owning pointer to shared buffer memory.
+    // Non-copyable: holds non-owning pointers to shared memory.
     GranularPitchShifter(const GranularPitchShifter&) = delete;
     GranularPitchShifter& operator=(const GranularPitchShifter&) = delete;
 
-    /// Configure with external memory. grainMs = grain duration (default 30ms).
-    /// bufferPtr must point to at least bufferSize doubles.
-    void configure(double* bufferPtr, int32_t bufferSize, double sampleRate, double grainMs = 30.0) {
+    /// Configure with external memory for both the circular buffer and Hann LUT.
+    /// bufferPtr: circular buffer (bufferSize doubles)
+    /// hannPtr: precomputed Hann window (grainSamples doubles), may be shared across channels
+    void configure(double* bufferPtr, int32_t bufferSize,
+                   double* hannPtr, int32_t grainSamples,
+                   double sampleRate) {
         mBuffer = bufferPtr;
         mBufferSize = bufferSize;
+        mHannLUT = hannPtr;
+        mGrainSamples = grainSamples;
         mSampleRate = sampleRate;
-        mGrainSamples = static_cast<int32_t>(grainMs * 0.001 * sampleRate);
-        if (mGrainSamples < 4) mGrainSamples = 4;
-        if (mGrainSamples > kMaxGrainSamples) mGrainSamples = kMaxGrainSamples;
-
-        // Precompute Hann window LUT (eliminates cos() from the audio loop)
-        for (int32_t i = 0; i < mGrainSamples; ++i) {
-            double phase = static_cast<double>(i) / static_cast<double>(mGrainSamples);
-            mHannLUT[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
-        }
 
         std::memset(mBuffer, 0, sizeof(double) * bufferSize);
 
@@ -42,7 +42,7 @@ public:
         mPitchRatio = 1.0;
         mLastSemitones = 0.0;
 
-        // Initialize two grains at 50% phase offset.
+        // Initialize two grains at 50% phase offset
         double initAge = static_cast<double>(mGrainSamples) * 2.0;
         mGrains[0].phase = 0.0;
         mGrains[0].sampleIndex = 0;
@@ -56,7 +56,6 @@ public:
     /// Clamped to ±48 semitones (4 octaves) to prevent buffer overrun from extreme ratios.
     /// Only recalculates pow() when the value actually changes (>0.001 threshold).
     void setPitchSemitones(double semitones) {
-        // Clamp to safe range — extreme ratios can cause readPos to escape buffer bounds
         if (semitones > 48.0) semitones = 48.0;
         if (semitones < -48.0) semitones = -48.0;
 
@@ -87,11 +86,13 @@ public:
             if (lutIdx >= mGrainSamples) lutIdx = mGrainSamples - 1;
             double window = mHannLUT[lutIdx];
 
-            // Read position: write head minus age, wrapped into [0, bufSize)
+            // Read position: write head minus age, wrapped into [0, bufSize).
+            // With ±48 semitone clamp (ratio ≤16), max age after reset = grainSize*16.
+            // Single conditional wrap is safe: |readPos| ≤ grainSize*16 < bufSize
+            // (bufSize = 0.5s of audio; grainSize*16 = 30ms*16 = 480ms < 500ms).
             double readPos = static_cast<double>(mWritePos) - grain.age;
-            // Use fmod for safety — handles any magnitude (defensive against extreme ratios)
-            readPos = std::fmod(readPos, bufSize);
             if (readPos < 0.0) readPos += bufSize;
+            else if (readPos >= bufSize) readPos -= bufSize;
 
             // Cubic Hermite interpolation
             output += window * hermiteRead(readPos);
@@ -124,9 +125,9 @@ public:
 
 private:
     struct Grain {
-        double phase = 0.0;       // 0..1 within grain
-        double age   = 0.0;       // samples behind write head
-        int32_t sampleIndex = 0;  // integer index into Hann LUT
+        double phase = 0.0;
+        double age   = 0.0;
+        int32_t sampleIndex = 0;
     };
 
     /// 4-point cubic Hermite interpolation at fractional position.
@@ -134,8 +135,6 @@ private:
         int i0 = static_cast<int>(pos);
         double frac = pos - i0;
 
-        // Wrap indices safely — pos is already in [0, bufferSize) so i0 is valid,
-        // but i0-1 and i0+2 need wrapping.
         int im1 = i0 - 1;
         if (im1 < 0) im1 += mBufferSize;
         int ip1 = i0 + 1;
@@ -148,7 +147,6 @@ private:
         double y1  = mBuffer[ip1];
         double y2  = mBuffer[ip2];
 
-        // Hermite coefficients
         double c0 = y0;
         double c1 = 0.5 * (y1 - y_1);
         double c2 = y_1 - 2.5 * y0 + 2.0 * y1 - 0.5 * y2;
@@ -157,17 +155,14 @@ private:
         return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
 
-    // Max grain size: 100ms @ 192kHz = 19200 samples
-    static constexpr int32_t kMaxGrainSamples = 19200;
-
     double* mBuffer     = nullptr;
     int32_t mBufferSize = 0;
     int32_t mWritePos   = 0;
-    double  mSampleRate = 48000.0;
+    double* mHannLUT    = nullptr;   // external: shared Hann window
     int32_t mGrainSamples = 1440;
+    double  mSampleRate = 48000.0;
     double  mPitchRatio = 1.0;
     double  mLastSemitones = 0.0;
 
-    double  mHannLUT[kMaxGrainSamples] = {};  // precomputed Hann window
     Grain   mGrains[2];
 };

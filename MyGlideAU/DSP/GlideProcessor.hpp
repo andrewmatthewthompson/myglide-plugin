@@ -52,18 +52,31 @@ public:
         mSmPitch.setTarget(0.0);
         mLastGlideTimeMs = 50.0;
 
-        // Allocate single contiguous memory block for pitch shifters
-        // Buffer size: 0.5 seconds of audio per channel
+        // Allocate single contiguous memory block for:
+        //   - Pitch shifter circular buffers (0.5s per channel)
+        //   - Shared Hann window LUT (one copy, both channels use it)
         mPitchBufSize = static_cast<int32_t>(sampleRate * 0.5);
+        mGrainSamples = static_cast<int32_t>(0.030 * sampleRate);  // 30ms
+        if (mGrainSamples < 4) mGrainSamples = 4;
+
         int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
-        int totalSamples = mPitchBufSize * clampedChannels;
+        int totalSamples = mPitchBufSize * clampedChannels + mGrainSamples;
 
         mMemory = new double[totalSamples]();
 
-        // Configure pitch shifters with their slice of memory
+        // Layout: [channel0 buffer | channel1 buffer | shared Hann LUT]
+        double* hannPtr = mMemory + mPitchBufSize * clampedChannels;
+
+        // Precompute shared Hann window (both channels use the same grain size)
+        for (int32_t i = 0; i < mGrainSamples; ++i) {
+            double phase = static_cast<double>(i) / static_cast<double>(mGrainSamples);
+            hannPtr[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+        }
+
+        // Configure pitch shifters with their slice of memory + shared Hann LUT
         for (int32_t ch = 0; ch < clampedChannels; ++ch) {
             double* buf = mMemory + ch * mPitchBufSize;
-            mPitchShifters[ch].configure(buf, mPitchBufSize, sampleRate, 30.0);
+            mPitchShifters[ch].configure(buf, mPitchBufSize, hannPtr, mGrainSamples, sampleRate);
         }
 
         // Reset MIDI state
@@ -203,8 +216,9 @@ private:
 
     // Pitch shifting
     GranularPitchShifter mPitchShifters[kMaxChannels];
-    double* mMemory     = nullptr;
+    double* mMemory      = nullptr;
     int32_t mPitchBufSize = 0;
+    int32_t mGrainSamples = 1440;
 
     // Automation curve (triple-buffered, lock-free)
     AutomationCurve mAutomation;
