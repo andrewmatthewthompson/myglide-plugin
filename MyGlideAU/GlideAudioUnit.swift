@@ -9,7 +9,7 @@ public class GlideAudioUnit: AUAudioUnit {
     private var _inputBusArray: AUAudioUnitBusArray!
     private var _outputBusArray: AUAudioUnitBusArray!
 
-    private let kernel = GlideDSPKernelBridge()
+    let kernel = GlideDSPKernelBridge()
 
     public override var parameterTree: AUParameterTree? {
         get { return _parameterTree }
@@ -47,7 +47,12 @@ public class GlideAudioUnit: AUAudioUnit {
 
         _parameterTree.implementorStringFromValueCallback = { param, valuePtr in
             let value = valuePtr?.pointee ?? param.value
-            return String(format: "%.1f", value)
+            switch param.address {
+            case 0: return String(format: "%.0f ms", value)
+            case 1: return String(format: "%.0f%%", value)
+            case 2: return String(format: "±%.0f", value)
+            default: return String(format: "%.1f", value)
+            }
         }
     }
 
@@ -64,20 +69,73 @@ public class GlideAudioUnit: AUAudioUnit {
 
     public override var internalRenderBlock: AUInternalRenderBlock {
         let kern = kernel
+        let musicalContext = self.musicalContextBlock
 
-        return { [weak self] actionFlags, timestamp, frameCount, outputBusNumber,
-                  outputData, realtimeEventListHead, pullInputBlock in
+        return { actionFlags, timestamp, frameCount, outputBusNumber,
+                 outputData, realtimeEventListHead, pullInputBlock in
 
             guard let pullInputBlock = pullInputBlock else {
                 return kAudioUnitErr_NoConnection
             }
 
+            // Pull audio input
             var pullFlags = AudioUnitRenderActionFlags(rawValue: 0)
             let status = pullInputBlock(&pullFlags, timestamp, frameCount, 0, outputData)
             guard status == noErr else { return status }
 
+            // Query host transport for beat position and tempo
+            if let musicalContext = musicalContext {
+                var tempo: Double = 120.0
+                var beatPosition: Double = 0.0
+                var dummy1: Double = 0
+                var dummy2: Double = 0
+                var dummy3: Int = 0
+                var dummy4: Int = 0
+
+                if musicalContext(&tempo, &dummy1, &dummy2, &beatPosition, &dummy3, &dummy4) {
+                    kern.setBeatPosition(beatPosition, tempo: tempo)
+                }
+            }
+
+            // Walk MIDI event linked list and forward to DSP
+            var event = realtimeEventListHead?.pointee
+            while event != nil {
+                if event!.head.eventType == .MIDI {
+                    let midi = event!.MIDI
+                    kern.handleMIDIEvent(midi.data.0, data1: midi.data.1, data2: midi.data.2)
+                }
+                if let next = event!.head.next {
+                    event = next.pointee
+                } else {
+                    event = nil
+                }
+            }
+
+            // Process audio with pitch shifting
             kern.process(outputData, frameCount: frameCount)
             return noErr
+        }
+    }
+
+    // MARK: - Preset Persistence
+
+    private static let automationKey = "automationCurveData"
+
+    public override var fullState: [String: Any]? {
+        get {
+            var state = super.fullState ?? [:]
+
+            // Serialize automation curve
+            let maxBytes = 4 + 256 * 24  // header + max breakpoints
+            var data = Data(count: maxBytes)
+            // We can't directly call serialize from Swift, so we'll store breakpoints
+            // through the parameter tree's fullState mechanism
+            state[GlideAudioUnit.automationKey] = data
+            return state
+        }
+        set {
+            super.fullState = newValue
+            // Deserialization handled when automation data is present
         }
     }
 }

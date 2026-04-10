@@ -26,7 +26,7 @@
             <array>
                 <dict>
                     <key>type</key>
-                    <string>aufx</string>
+                    <string>aumf</string>
                     <key>subtype</key>
                     <string>Gld1</string>
                     <key>manufacturer</key>
@@ -36,7 +36,7 @@
                     <key>factoryFunction</key>
                     <string>MyGlideAU.AudioUnitFactory</string>
                     <key>description</key>
-                    <string>MyGlide AUv3 glide/portamento effect</string>
+                    <string>MyGlide AUv3 MIDI pitch automation / glide</string>
                     <key>tags</key>
                     <array>
                         <string>Effects</string>

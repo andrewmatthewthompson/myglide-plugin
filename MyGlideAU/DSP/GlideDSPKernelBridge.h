@@ -9,4 +9,18 @@
 - (AUValue)getParameter:(AUParameterAddress)address;
 - (void)process:(AudioBufferList *)bufferList frameCount:(AUAudioFrameCount)frameCount;
 
+// MIDI event handling
+- (void)handleMIDIEvent:(uint8_t)status data1:(uint8_t)data1 data2:(uint8_t)data2;
+
+// Musical context
+- (void)setBeatPosition:(double)beatPosition tempo:(double)tempo;
+
+// Automation curve access (for UI ↔ DSP)
+- (void *)automationCurvePtr;
+
+// Active note bitmask (for UI display)
+- (uint64_t)activeNoteBitmaskLo;
+- (uint64_t)activeNoteBitmaskHi;
+- (double)currentBeatPosition;
+
 @end

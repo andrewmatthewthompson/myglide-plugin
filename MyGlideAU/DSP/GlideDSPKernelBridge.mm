@@ -25,4 +25,28 @@
     _kernel.process(bufferList, frameCount);
 }
 
+- (void)handleMIDIEvent:(uint8_t)status data1:(uint8_t)data1 data2:(uint8_t)data2 {
+    _kernel.handleMIDIEvent(status, data1, data2);
+}
+
+- (void)setBeatPosition:(double)beatPosition tempo:(double)tempo {
+    _kernel.setBeatPosition(beatPosition, tempo);
+}
+
+- (void *)automationCurvePtr {
+    return _kernel.automationCurvePtr();
+}
+
+- (uint64_t)activeNoteBitmaskLo {
+    return _kernel.activeNoteBitmaskLo();
+}
+
+- (uint64_t)activeNoteBitmaskHi {
+    return _kernel.activeNoteBitmaskHi();
+}
+
+- (double)currentBeatPosition {
+    return _kernel.currentBeatPosition();
+}
+
 @end
