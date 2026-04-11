@@ -45,6 +45,7 @@ melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
 - **Undo/redo** (50 levels, Cmd+Z / Cmd+Shift+Z, drag coalescing)
 - **Real-time pitch indicator** (+X.X st) in controls bar + dot on curve at playhead
 - **Input/output level meters** (stereo, green/gold/red, 30fps)
+- **Breakpoint right-click context menu** (per-breakpoint interpolation, duplicate, delete)
 - **Breakpoint selection** + Delete key
 - Playhead tracking at 30fps
 

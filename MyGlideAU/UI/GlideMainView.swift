@@ -112,6 +112,32 @@ class AutomationState: ObservableObject {
         commitToDSP()
     }
 
+    func duplicateBreakpoint(index: Int) {
+        guard index >= 0 && index < breakpoints.count else { return }
+        pushUndo()
+        let src = breakpoints[index]
+        let newBeat = src.beat + 0.5
+        breakpoints.append(UIBreakpoint(beat: newBeat, semitones: src.semitones, interpType: src.interpType))
+        breakpoints.sort { $0.beat < $1.beat }
+        commitToDSP()
+    }
+
+    func setBreakpointInterp(index: Int, interpType: Int) {
+        guard index >= 0 && index < breakpoints.count else { return }
+        pushUndo()
+        breakpoints[index].interpType = interpType
+        commitToDSP()
+    }
+
+    func setBreakpointValue(index: Int, beat: Double, semitones: Double) {
+        guard index >= 0 && index < breakpoints.count else { return }
+        pushUndo()
+        breakpoints[index].beat = max(0, beat)
+        breakpoints[index].semitones = semitones
+        breakpoints.sort { $0.beat < $1.beat }
+        commitToDSP()
+    }
+
     // MARK: - Editing
 
     func addBreakpoint(beat: Double, semitones: Double) {
@@ -570,7 +596,7 @@ struct GlideMainView: View {
                             }
                     )
 
-                // Double-click to delete
+                // Breakpoint hit targets: double-click to delete, right-click for context menu
                 ForEach(Array(automation.breakpoints.enumerated()), id: \.element.id) { index, bp in
                     let x = beatToX(bp.beat, width: size.width)
                     let y = semitonesToY(bp.semitones, height: size.height, range: pitchRange)
@@ -581,6 +607,17 @@ struct GlideMainView: View {
                         .position(x: x, y: y)
                         .onTapGesture(count: 2) {
                             automation.removeBreakpoint(index: index)
+                        }
+                        .contextMenu {
+                            // Per-breakpoint interpolation type
+                            Menu("Interpolation") {
+                                Button("Linear") { automation.setBreakpointInterp(index: index, interpType: 0) }
+                                Button("Smooth") { automation.setBreakpointInterp(index: index, interpType: 1) }
+                                Button("Step")   { automation.setBreakpointInterp(index: index, interpType: 2) }
+                            }
+                            Divider()
+                            Button("Duplicate") { automation.duplicateBreakpoint(index: index) }
+                            Button("Delete", role: .destructive) { automation.removeBreakpoint(index: index) }
                         }
                 }
             }
