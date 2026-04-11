@@ -81,7 +81,7 @@ public class GlideAudioUnit: AUAudioUnit {
         }
 
         _parameterTree.implementorValueProvider = { [weak self] param in
-            return self?.kernel.getParameter(param.address) ?? param.defaultValue
+            return self?.kernel.getParameter(param.address) ?? 0
         }
 
         _parameterTree.implementorStringFromValueCallback = { param, valuePtr in
@@ -136,7 +136,10 @@ public class GlideAudioUnit: AUAudioUnit {
 
     public override var factoryPresets: [AUAudioUnitPreset]? {
         return GlideAudioUnit.factoryPresetData.enumerated().map { index, data in
-            AUAudioUnitPreset(number: index, name: data.name)
+            let preset = AUAudioUnitPreset()
+            preset.number = index
+            preset.name = data.name
+            return preset
         }
     }
 
@@ -176,8 +179,7 @@ public class GlideAudioUnit: AUAudioUnit {
     public override var fullState: [String: Any]? {
         get {
             var state = super.fullState ?? [:]
-            let data = kernel.automationSerialize()
-            if data.count > 0 {
+            if let data = kernel.automationSerialize(), data.count > 0 {
                 state[GlideAudioUnit.automationKey] = data
             }
             return state
@@ -185,7 +187,7 @@ public class GlideAudioUnit: AUAudioUnit {
         set {
             super.fullState = newValue
             if let data = newValue?[GlideAudioUnit.automationKey] as? Data {
-                kernel.automationDeserialize(fromData: data)
+                kernel.automationDeserialize(from: data)
                 DispatchQueue.main.async { [weak self] in
                     self?.onStateRestored?()
                 }
@@ -231,12 +233,17 @@ public class GlideAudioUnit: AUAudioUnit {
             if let musicalContext = musicalContext {
                 var tempo: Double = 120.0
                 var beatPosition: Double = 0.0
-                var dummy1: Double = 0
-                var dummy2: Double = 0
-                var dummy3: Int = 0
-                var dummy4: Int = 0
+                var timeSigNumerator: Double = 0
+                var timeSigDenominator: Int = 0
+                var sampleOffsetToNextBeat: Int = 0
+                var currentMeasureDownbeat: Double = 0
 
-                if musicalContext(&tempo, &dummy1, &dummy2, &beatPosition, &dummy3, &dummy4) {
+                if musicalContext(&tempo,
+                                  &timeSigNumerator,
+                                  &timeSigDenominator,
+                                  &beatPosition,
+                                  &sampleOffsetToNextBeat,
+                                  &currentMeasureDownbeat) {
                     kern.setBeatPosition(beatPosition, tempo: tempo)
                 }
             }
