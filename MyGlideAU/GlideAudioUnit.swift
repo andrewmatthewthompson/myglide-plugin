@@ -248,13 +248,15 @@ public class GlideAudioUnit: AUAudioUnit {
                 }
             }
 
-            var eventPtr = realtimeEventListHead
+            var eventPtr: UnsafePointer<AURenderEvent>? = realtimeEventListHead
             while let event = eventPtr {
                 if event.pointee.head.eventType == .MIDI {
                     let midi = event.pointee.MIDI
                     kern.handleMIDIEvent(midi.data.0, data1: midi.data.1, data2: midi.data.2)
                 }
-                eventPtr = event.pointee.head.next
+                // `next` is imported as UnsafeMutablePointer; convert to the
+                // immutable type that matches `realtimeEventListHead`.
+                eventPtr = event.pointee.head.next.map(UnsafePointer.init)
             }
 
             kern.process(outputData, frameCount: frameCount)
