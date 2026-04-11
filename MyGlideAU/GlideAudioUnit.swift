@@ -80,9 +80,11 @@ public class GlideAudioUnit: AUAudioUnit {
             }
         }
 
-        _parameterTree.implementorValueProvider = { [weak self] param in
-            return self?.kernel.getParameter(param.address) ?? 0
-        }
+        // Deliberately NOT installing `implementorValueProvider`:
+        // the parameter tree caches its last-set value, and we use that
+        // as the source of truth so hosts (and auval) get a stable
+        // round-trip. The kernel is kept in sync via the observer above
+        // and via `pushParameterValuesToKernel()` after setUp.
 
         _parameterTree.implementorStringFromValueCallback = { param, valuePtr in
             let value = valuePtr?.pointee ?? param.value
@@ -201,6 +203,19 @@ public class GlideAudioUnit: AUAudioUnit {
         try super.allocateRenderResources()
         let sampleRate = _outputBus.format.sampleRate
         kernel.setUp(Int32(outputBusses[0].format.channelCount), sampleRate: sampleRate)
+        // The kernel was just reinitialized, so its parameter storage is
+        // back to whatever the processor's constructor defaults are.
+        // Push the parameter tree's current values back into the DSP so
+        // state set before initialization (by the host or auval) is
+        // preserved across reset/init cycles.
+        pushParameterValuesToKernel()
+    }
+
+    private func pushParameterValuesToKernel() {
+        guard let tree = _parameterTree else { return }
+        for param in tree.allParameters {
+            kernel.setParameter(param.address, value: param.value)
+        }
     }
 
     public override func deallocateRenderResources() {
