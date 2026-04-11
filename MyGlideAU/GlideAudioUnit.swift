@@ -256,7 +256,7 @@ public class GlideAudioUnit: AUAudioUnit {
                 }
                 // `next` is imported as UnsafeMutablePointer; convert to the
                 // immutable type that matches `realtimeEventListHead`.
-                eventPtr = event.pointee.head.next.map(UnsafePointer.init)
+                eventPtr = event.pointee.head.next.map { UnsafePointer($0) }
             }
 
             kern.process(outputData, frameCount: frameCount)
