@@ -11,12 +11,28 @@ private func noteName(midi: Int) -> String {
     return "\(name)\(octave)"
 }
 
-/// Helpers for classifying MIDI notes as black/white piano keys.
+/// Helpers for classifying MIDI notes as black/white piano keys and
+/// checking active-note state from the DSP's 128-bit note bitmask.
 private enum PianoKey {
     private static let blackPitchClasses: Set<Int> = [1, 3, 6, 8, 10]
 
     static func isBlack(midi: Int) -> Bool {
         blackPitchClasses.contains(((midi % 12) + 12) % 12)
+    }
+
+    static func isActive(midi: Int, maskLo: UInt64, maskHi: UInt64) -> Bool {
+        guard midi >= 0 && midi < 128 else { return false }
+        if midi < 64 {
+            return (maskLo & (UInt64(1) << midi)) != 0
+        } else {
+            return (maskHi & (UInt64(1) << (midi - 64))) != 0
+        }
+    }
+
+    static func octaveLabel(midi: Int) -> String {
+        // MIDI note 60 == C4 in the "scientific" octave convention Logic uses.
+        let octave = (midi / 12) - 1
+        return "C\(octave)"
     }
 }
 
@@ -545,128 +561,94 @@ struct GlideMainView: View {
     }
 
     // MARK: - Piano Roll Sidebar
+    //
+    // Rendered into a single `Canvas` pass rather than a tree of SwiftUI
+    // `Rectangle`s with per-key gradients/shadows/animations. Under the
+    // 30 Hz display timer the old per-view approach re-laid-out ~24 heavy
+    // modifiers every frame; Canvas does it with a couple of fills.
 
     private var pianoRollSidebar: some View {
-        GeometryReader { geo in
-            let noteCount = noteRangeHigh - noteRangeLow
-            let semitoneHeight = geo.size.height / CGFloat(noteCount)
-            let width = geo.size.width
-
-            ZStack(alignment: .topLeading) {
-                // Dark backdrop that shows through between keys.
-                Color(red: 0.03, green: 0.04, blue: 0.06)
-
-                // White-key layer: drawn first so black keys sit on top.
-                ForEach(0..<noteCount, id: \.self) { i in
-                    let midi = noteRangeHigh - 1 - i
-                    if !PianoKey.isBlack(midi: midi) {
-                        pianoWhiteKey(
-                            midi: midi,
-                            yOffset: CGFloat(i) * semitoneHeight,
-                            height: semitoneHeight,
-                            width: width,
-                            isActive: isNoteActive(midi)
-                        )
-                    }
-                }
-
-                // Black-key layer on top, narrower and offset to the left.
-                ForEach(0..<noteCount, id: \.self) { i in
-                    let midi = noteRangeHigh - 1 - i
-                    if PianoKey.isBlack(midi: midi) {
-                        pianoBlackKey(
-                            midi: midi,
-                            yOffset: CGFloat(i) * semitoneHeight,
-                            height: semitoneHeight,
-                            width: width,
-                            isActive: isNoteActive(midi)
-                        )
-                    }
-                }
-            }
+        Canvas(opaque: true, rendersAsynchronously: false) { context, size in
+            drawPianoSidebar(context: &context, size: size)
         }
     }
 
-    @ViewBuilder
-    private func pianoWhiteKey(midi: Int, yOffset: CGFloat, height: CGFloat, width: CGFloat, isActive: Bool) -> some View {
-        let inactiveFill = LinearGradient(
-            colors: [Color(white: 0.96), Color(white: 0.82)],
-            startPoint: .leading, endPoint: .trailing
+    private func drawPianoSidebar(context: inout GraphicsContext, size: CGSize) {
+        let noteCount = noteRangeHigh - noteRangeLow
+        guard noteCount > 0 else { return }
+
+        let semitoneHeight = size.height / CGFloat(noteCount)
+        let width = size.width
+        let maskLo = activeNoteMask.0
+        let maskHi = activeNoteMask.1
+
+        // Backdrop
+        context.fill(
+            Path(CGRect(origin: .zero, size: size)),
+            with: .color(Color(red: 0.03, green: 0.04, blue: 0.06))
         )
-        let activeFill = LinearGradient(
-            colors: [
-                Color(red: 0.62, green: 0.90, blue: 1.00),
-                Color(red: 0.38, green: 0.70, blue: 0.92),
-            ],
-            startPoint: .leading, endPoint: .trailing
-        )
 
-        ZStack(alignment: .trailing) {
-            // Key body
-            Rectangle()
-                .fill(isActive ? AnyShapeStyle(activeFill) : AnyShapeStyle(inactiveFill))
+        // Flat palette — no gradients. The user asked for solid black
+        // black-keys and wants this as cheap as possible.
+        let whiteFill          = Color(white: 0.92)
+        let whiteActiveFill    = Color(red: 0.55, green: 0.88, blue: 1.00)
+        let blackFill          = Color.black
+        let blackActiveFill    = Color(red: 0.14, green: 0.42, blue: 0.60)
+        let dividerColor       = Color.black.opacity(0.30)
+        let labelColor         = Color(white: 0.22)
 
-            // Thin divider at the bottom of each white key (between adjacent whites)
-            VStack {
-                Spacer()
-                Rectangle()
-                    .fill(Color.black.opacity(0.28))
-                    .frame(height: 0.5)
-            }
+        let cornerRadius: CGFloat = 3
+        let keyInsetY: CGFloat = 0.5 // gives us the dark divider between white keys
+        let blackKeyWidth = width * 0.58
 
-            // Label on C notes
+        // Pass 1: white keys
+        for i in 0..<noteCount {
+            let midi = noteRangeHigh - 1 - i
+            if PianoKey.isBlack(midi: midi) { continue }
+
+            let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
+            let y = CGFloat(i) * semitoneHeight + keyInsetY
+            let h = max(semitoneHeight - (keyInsetY * 2), 1)
+
+            let rect = CGRect(x: 0, y: y, width: width, height: h)
+            let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
+            context.fill(path, with: .color(active ? whiteActiveFill : whiteFill))
+
+            // C-note label
             if midi % 12 == 0 {
-                Text(octaveLabel(midi: midi))
+                let label = Text(PianoKey.octaveLabel(midi: midi))
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .foregroundColor(Color(white: 0.22))
-                    .padding(.trailing, 6)
+                    .foregroundColor(labelColor)
+                context.draw(label, at: CGPoint(x: width - 6, y: y + h / 2), anchor: .trailing)
             }
         }
-        .frame(width: width, height: height)
-        .scaleEffect(x: isActive ? 0.985 : 1.0, y: isActive ? 0.90 : 1.0, anchor: .leading)
-        .brightness(isActive ? -0.05 : 0)
-        .shadow(color: .black.opacity(isActive ? 0.35 : 0), radius: 1, x: 0, y: 0)
-        .animation(.easeOut(duration: 0.08), value: isActive)
-        .offset(y: yOffset)
-    }
 
-    @ViewBuilder
-    private func pianoBlackKey(midi: Int, yOffset: CGFloat, height: CGFloat, width: CGFloat, isActive: Bool) -> some View {
-        let inactiveFill = LinearGradient(
-            colors: [Color(white: 0.08), Color(white: 0.22), Color(white: 0.12)],
-            startPoint: .top, endPoint: .bottom
-        )
-        let activeFill = LinearGradient(
-            colors: [
-                Color(red: 0.10, green: 0.28, blue: 0.40),
-                Color(red: 0.18, green: 0.46, blue: 0.60),
-                Color(red: 0.08, green: 0.22, blue: 0.34),
-            ],
-            startPoint: .top, endPoint: .bottom
-        )
+        // Divider line under each white key to visually separate adjacent
+        // whites (cheap single stroke).
+        let dividerPath = Path { p in
+            for i in 0..<noteCount {
+                let midi = noteRangeHigh - 1 - i
+                if PianoKey.isBlack(midi: midi) { continue }
+                let y = CGFloat(i + 1) * semitoneHeight
+                p.move(to: CGPoint(x: 0, y: y))
+                p.addLine(to: CGPoint(x: width, y: y))
+            }
+        }
+        context.stroke(dividerPath, with: .color(dividerColor), lineWidth: 0.5)
 
-        let keyWidth = width * 0.58
-        let keyHeightBase = max(height - 1, 1)
+        // Pass 2: black keys on top
+        for i in 0..<noteCount {
+            let midi = noteRangeHigh - 1 - i
+            if !PianoKey.isBlack(midi: midi) { continue }
 
-        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-            .fill(isActive ? AnyShapeStyle(activeFill) : AnyShapeStyle(inactiveFill))
-            .overlay(
-                // Highlight ridge across the top for subtle 3D look
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .stroke(Color.white.opacity(isActive ? 0.10 : 0.18), lineWidth: 0.5)
-            )
-            .frame(width: keyWidth, height: keyHeightBase)
-            .scaleEffect(x: isActive ? 0.96 : 1.0, y: isActive ? 0.88 : 1.0, anchor: .leading)
-            .brightness(isActive ? -0.04 : 0)
-            .shadow(color: .black.opacity(isActive ? 0.5 : 0.35), radius: isActive ? 0.8 : 1.2, x: 0, y: 0.5)
-            .animation(.easeOut(duration: 0.08), value: isActive)
-            .offset(x: 0, y: yOffset + 0.5)
-    }
+            let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
+            let y = CGFloat(i) * semitoneHeight + 1
+            let h = max(semitoneHeight - 2, 1)
 
-    private func octaveLabel(midi: Int) -> String {
-        // MIDI note 60 == C4 in the "scientific" octave convention used by Logic.
-        let octave = (midi / 12) - 1
-        return "C\(octave)"
+            let rect = CGRect(x: 0, y: y, width: blackKeyWidth, height: h)
+            let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
+            context.fill(path, with: .color(active ? blackActiveFill : blackFill))
+        }
     }
 
     // MARK: - Automation Canvas
