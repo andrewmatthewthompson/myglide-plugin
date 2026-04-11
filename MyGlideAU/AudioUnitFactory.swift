@@ -17,6 +17,8 @@ public class AudioUnitFactory: NSObject, AUAudioUnitFactory {
             return
         }
         let hostingController = NSHostingController(rootView: GlideMainView(audioUnit: audioUnit))
+        hostingController.preferredContentSize = NSSize(width: 700, height: 500)
+        hostingController.sizingOptions = .preferredContentSize
         completionHandler(hostingController)
     }
 }

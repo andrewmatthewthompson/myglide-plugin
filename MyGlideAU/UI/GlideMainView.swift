@@ -270,7 +270,7 @@ struct GlideMainView: View {
                     .frame(height: 24)
             }
         }
-        .frame(width: 700, height: 500)
+        .frame(minWidth: 500, idealWidth: 700, minHeight: 350, idealHeight: 500)
         .background(
             // Hidden buttons for keyboard shortcuts
             Group {
