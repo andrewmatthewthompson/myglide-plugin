@@ -15,6 +15,3 @@ Tests/bench_glide
 
 # macOS
 .DS_Store
-
-# Local developer config (team ID / signing identity)
-Local.xcconfig
