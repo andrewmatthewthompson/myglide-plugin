@@ -158,6 +158,21 @@ class AutomationState: ObservableObject {
         commitToDSP()
     }
 
+    /// Inserts a new breakpoint at the given position and returns its stable id so
+    /// the caller can continue to track it across subsequent sort operations.
+    /// Unlike `addBreakpoint`, this does NOT call `pushUndo()` itself — the caller
+    /// is expected to wrap the drag in `beginDrag()` / `endDrag()`.
+    @discardableResult
+    func insertBreakpointReturningID(beat: Double, semitones: Double) -> UUID {
+        let snappedBeat = snapBeat(beat)
+        let snappedSemi = snapEnabled ? semitones.rounded() : semitones
+        let newBP = UIBreakpoint(beat: snappedBeat, semitones: snappedSemi, interpType: interpolationMode)
+        breakpoints.append(newBP)
+        breakpoints.sort { $0.beat < $1.beat }
+        commitToDSP()
+        return newBP.id
+    }
+
     func moveBreakpoint(index: Int, beat: Double, semitones: Double) {
         guard index >= 0 && index < breakpoints.count else { return }
         let snappedBeat = snapBeat(beat)
@@ -296,6 +311,14 @@ struct GlideMainView: View {
     @State private var basePanStart: Double = 0.0      // for pan gesture
     @State private var noteRangeLow: Int = 48
     @State private var noteRangeHigh: Int = 72
+
+    // Drag state for the "grab-the-line-to-bend-it" interaction:
+    // tracks which breakpoint (by stable id) is currently being dragged,
+    // whether the gesture has actually moved far enough to count as a
+    // drag (vs. a tap), and the starting curve semitone value at the
+    // click's beat so we can insert a joint on the line.
+    @State private var draggingBreakpointID: UUID? = nil
+    @State private var dragGestureMoved: Bool = false
 
     var body: some View {
         ZStack {
@@ -664,41 +687,88 @@ struct GlideMainView: View {
                     drawAutoGlideTarget(context: context, size: canvasSize, pitchRange: pitchRange)
                 }
 
-                // Interaction layer: click to add/select, drag to move or draw
-                // Disabled in Auto mode (MIDI drives pitch, not breakpoints)
+                // Interaction layer: tap to select, drag to grab-and-bend the curve.
+                // Disabled in Auto mode (MIDI drives pitch, not breakpoints).
+                //
+                // Logic-style interaction:
+                //   • Drag on an existing breakpoint → move that breakpoint.
+                //   • Drag on empty space            → insert a new joint at the
+                //     drag-start location and drag it with the gesture, so the
+                //     user grabs the curve and bends it into a new shape.
+                //   • Pure tap on an existing breakpoint → select it.
+                //   • Pure tap on empty space       → add a breakpoint there
+                //     (kept for discoverability).
+                //   • Draw mode overrides all of this with the pencil behaviour.
                 Color.clear
                     .contentShape(Rectangle())
                     .allowsHitTesting(params.autoGlide < 0.5)
                     .gesture(
                         DragGesture(minimumDistance: 0)
-                            .onEnded { value in
-                                let beat = xToBeat(value.location.x, width: size.width)
-                                let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
-
-                                if let idx = nearestBreakpointIndex(at: value.location, size: size, pitchRange: pitchRange, threshold: 12) {
-                                    automation.selectedIndex = idx
-                                } else if !automation.drawMode {
-                                    automation.addBreakpoint(beat: beat, semitones: semi)
-                                }
-                            }
-                    )
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 5)
                             .onChanged { value in
+                                let movement = hypot(value.translation.width, value.translation.height)
+
+                                // Treat sub-2pt wiggles as still-a-tap to keep
+                                // click-to-add-joint feeling responsive.
+                                if !dragGestureMoved && movement < 2 {
+                                    return
+                                }
+
+                                if !dragGestureMoved {
+                                    dragGestureMoved = true
+                                    automation.beginDrag()
+
+                                    if automation.drawMode {
+                                        // Draw mode: handled in the movement branch below.
+                                    } else if let idx = nearestBreakpointIndex(
+                                        at: value.startLocation,
+                                        size: size,
+                                        pitchRange: pitchRange,
+                                        threshold: 12
+                                    ) {
+                                        draggingBreakpointID = automation.breakpoints[idx].id
+                                    } else {
+                                        // No joint under the cursor: insert one at the
+                                        // start location, then keep dragging it.
+                                        let startBeat = xToBeat(value.startLocation.x, width: size.width)
+                                        let startSemi = yToSemitones(value.startLocation.y, height: size.height, range: pitchRange)
+                                        draggingBreakpointID = automation.insertBreakpointReturningID(
+                                            beat: startBeat,
+                                            semitones: startSemi
+                                        )
+                                    }
+                                }
+
                                 let beat = xToBeat(value.location.x, width: size.width)
                                 let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
 
                                 if automation.drawMode {
-                                    // Draw mode: create breakpoints along the drag path
-                                    automation.beginDrag()
                                     automation.drawBreakpoint(beat: beat, semitones: semi)
-                                } else if let idx = nearestBreakpointIndex(at: value.startLocation, size: size, pitchRange: pitchRange, threshold: 12) {
-                                    automation.beginDrag()
+                                } else if let id = draggingBreakpointID,
+                                          let idx = automation.breakpoints.firstIndex(where: { $0.id == id }) {
                                     automation.moveBreakpoint(index: idx, beat: beat, semitones: semi)
                                 }
                             }
-                            .onEnded { _ in
+                            .onEnded { value in
+                                if !dragGestureMoved {
+                                    // Pure tap: select if on a joint, otherwise add one.
+                                    let beat = xToBeat(value.location.x, width: size.width)
+                                    let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
+
+                                    if let idx = nearestBreakpointIndex(
+                                        at: value.location,
+                                        size: size,
+                                        pitchRange: pitchRange,
+                                        threshold: 12
+                                    ) {
+                                        automation.selectedIndex = idx
+                                    } else if !automation.drawMode {
+                                        automation.addBreakpoint(beat: beat, semitones: semi)
+                                    }
+                                }
+
                                 automation.endDrag()
+                                draggingBreakpointID = nil
+                                dragGestureMoved = false
                             }
                     )
 
