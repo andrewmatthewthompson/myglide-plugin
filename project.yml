@@ -8,6 +8,9 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: 3A65ZC4ZCK
+    CODE_SIGN_IDENTITY: "Apple Development"
 
 targets:
   MyGlide:
