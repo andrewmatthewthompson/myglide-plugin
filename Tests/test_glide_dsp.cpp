@@ -1472,6 +1472,75 @@ TEST(level_meter_input_differs_from_output_with_pitch) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Code Review Fix Tests
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(fix_vocoder_phase_wrap_long_session) {
+    // Simulate a long session: process ~10 minutes of audio at 48kHz.
+    // Before the fix, mSynthPhase would grow to millions and lose precision.
+    // After the fix, phase is wrapped to [0, 2*pi) every hop.
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(7.0);  // +7 semitones (a fifth)
+
+    // Process 10 minutes = 28,800,000 samples. That's ~56,250 STFT frames.
+    // Do it in large blocks to keep the test fast.
+    const int blockSize = 48000;  // 1 second at a time
+    const int blocks = 10 * 60;   // 10 minutes
+    float output[48000];
+    bool allValid = true;
+
+    for (int b = 0; b < blocks; ++b) {
+        for (int i = 0; i < blockSize; ++i)
+            output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+
+        // Check last block for NaN/Inf
+        if (b == blocks - 1) {
+            if (hasInvalidSamples(output, blockSize)) allValid = false;
+        }
+    }
+
+    EXPECT(allValid);
+    // After 10 min, output should still have energy (no phase drift to silence)
+    EXPECT(rms(output, blockSize) > 0.01);
+}
+
+TEST(fix_vocoder_undersized_buffer_no_crash) {
+    // configure() with a buffer smaller than kMemoryPerChannel should not crash
+    double tinyBuf[100];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+
+    // This should early-return without crashing (buffer too small)
+    for (int32_t i = 0; i < PhaseVocoderPitchShifter::kFFTSize; ++i) {
+        double phase = double(i) / double(PhaseVocoderPitchShifter::kFFTSize);
+        hann[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+    }
+    ps.configure(tinyBuf, 100, hann, PhaseVocoderPitchShifter::kFFTSize, 48000.0);
+
+    // process() should return input (unconfigured — mInputRing is still null)
+    double out = ps.process(0.5);
+    EXPECT(!std::isnan(out) && !std::isinf(out));
+}
+
+TEST(fix_null_buffers_no_crash) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Pass nullptr as buffers — should not crash (null guard)
+    p.process(nullptr, 2, 512);
+    EXPECT(true);  // didn't crash
+
+    // Pass buffer with null channel pointer
+    float* channels[2] = { nullptr, nullptr };
+    p.process(channels, 2, 512);
+    EXPECT(true);  // didn't crash
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Auto-Glide Tests
 // ══════════════════════════════════════════════════════════════════════════
 
