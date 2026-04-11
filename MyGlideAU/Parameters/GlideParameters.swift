@@ -8,6 +8,7 @@ enum GlideParameters {
         case mix         = 1   // Wet/dry mix (%)
         case pitchRange  = 2   // Display range: 12 or 24 semitones
         case pitchOffset = 3   // DAW-automatable pitch offset (semitones)
+        case shifterMode = 4   // 0=Granular, 1=Vocoder
     }
 
     static func createParameters() -> [AUParameter] {
@@ -56,6 +57,18 @@ enum GlideParameters {
                 max: 24,
                 unit: .generic,
                 unitName: "semi",
+                flags: [.flag_IsReadable, .flag_IsWritable],
+                valueStrings: nil,
+                dependentParameters: nil
+            ),
+            AUParameterTree.createParameter(
+                withIdentifier: "shifterMode",
+                name: "Shifter Mode",
+                address: Address.shifterMode.rawValue,
+                min: 0,
+                max: 1,
+                unit: .indexed,
+                unitName: nil,
                 flags: [.flag_IsReadable, .flag_IsWritable],
                 valueStrings: nil,
                 dependentParameters: nil

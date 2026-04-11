@@ -1172,6 +1172,244 @@ TEST(processor_resumable_after_bypass) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Phase Vocoder Tests
+// ══════════════════════════════════════════════════════════════════════════
+
+static void configureVocoder(PhaseVocoderPitchShifter& ps, double* buf, double* hann, double sampleRate) {
+    const int32_t fftSize = PhaseVocoderPitchShifter::kFFTSize;
+    for (int32_t i = 0; i < fftSize; ++i) {
+        double phase = static_cast<double>(i) / static_cast<double>(fftSize);
+        hann[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+    }
+    ps.configure(buf, PhaseVocoderPitchShifter::kMemoryPerChannel, hann, fftSize, sampleRate);
+}
+
+TEST(vocoder_fft_roundtrip) {
+    // Forward FFT then inverse should reconstruct the original signal
+    double real[2048], imag[2048];
+    for (int i = 0; i < 2048; ++i) {
+        real[i] = std::sin(2.0 * M_PI * 440.0 * i / 48000.0);
+        imag[i] = 0.0;
+    }
+    double origPeak = 0;
+    for (int i = 0; i < 2048; ++i) {
+        double a = std::fabs(real[i]);
+        if (a > origPeak) origPeak = a;
+    }
+
+    // Forward + inverse FFT (access via a temporary vocoder just to call the static method)
+    PhaseVocoderPitchShifter::fft(real, imag, 2048, false);
+    PhaseVocoderPitchShifter::fft(real, imag, 2048, true);
+
+    // Should reconstruct within tolerance
+    double maxErr = 0;
+    for (int i = 0; i < 2048; ++i) {
+        double expected = std::sin(2.0 * M_PI * 440.0 * i / 48000.0);
+        double err = std::fabs(real[i] - expected);
+        if (err > maxErr) maxErr = err;
+    }
+    EXPECT(maxErr < 1e-10);
+}
+
+TEST(vocoder_passthrough_at_zero_semitones) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(0.0);
+
+    // Warmup (fill the FFT buffer)
+    float output[48000];
+    for (int i = 0; i < 48000; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+
+    // After warmup, output should have energy
+    double outRms = rms(output + 4096, 43904);
+    EXPECT(outRms > 0.01);
+}
+
+TEST(vocoder_zero_semitones_preserves_440hz) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(0.0);
+
+    float output[48000];
+    for (int i = 0; i < 48000; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+
+    double mag440 = goertzel(output + 4096, 43904, 440.0, 48000.0);
+    double mag880 = goertzel(output + 4096, 43904, 880.0, 48000.0);
+    EXPECT(mag440 > mag880 * 2.0);
+}
+
+TEST(vocoder_octave_up) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(12.0);
+
+    float output[48000];
+    for (int i = 0; i < 48000; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+
+    double mag880 = goertzel(output + 4096, 43904, 880.0, 48000.0);
+    double mag440 = goertzel(output + 4096, 43904, 440.0, 48000.0);
+    EXPECT(mag880 > mag440);
+}
+
+TEST(vocoder_no_invalid_samples) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(7.0);
+
+    float output[48000];
+    for (int i = 0; i < 48000; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    EXPECT(!hasInvalidSamples(output, 48000));
+}
+
+TEST(vocoder_no_runaway) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(24.0);
+
+    float output[48000];
+    for (int i = 0; i < 48000; ++i)
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    EXPECT(peakAbs(output, 48000) < 5.0);
+}
+
+TEST(vocoder_silence_stays_silent) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+    ps.setPitchSemitones(12.0);
+
+    float output[4800];
+    for (int i = 0; i < 4800; ++i)
+        output[i] = float(ps.process(0.0));
+    EXPECT(peakAbs(output, 4800) < 1e-10);
+}
+
+TEST(vocoder_rapid_pitch_changes) {
+    double buf[PhaseVocoderPitchShifter::kMemoryPerChannel];
+    double hann[PhaseVocoderPitchShifter::kFFTSize];
+    PhaseVocoderPitchShifter ps;
+    configureVocoder(ps, buf, hann, 48000.0);
+
+    float output[48000];
+    for (int i = 0; i < 48000; ++i) {
+        double semi = -24.0 + 48.0 * (double(i) / 48000.0);
+        ps.setPitchSemitones(semi);
+        output[i] = float(ps.process(0.5 * std::sin(2.0 * M_PI * 440.0 * i / 48000.0)));
+    }
+    EXPECT(!hasInvalidSamples(output, 48000) && peakAbs(output, 48000) < 10.0);
+}
+
+TEST(processor_vocoder_mode_no_crash) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kShifterMode, 1.0f);
+    p.setParameter(kMix, 100.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+    EXPECT(!hasInvalidSamples(buf.left, 48000) && !hasInvalidSamples(buf.right, 48000));
+}
+
+TEST(processor_mode_switch_no_crash) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    StereoBuffer buf;
+    // Process in granular mode
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    // Switch to vocoder mid-stream
+    p.setParameter(kShifterMode, 1.0f);
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    // Switch back
+    p.setParameter(kShifterMode, 0.0f);
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    EXPECT(!hasInvalidSamples(buf.left, 4800));
+}
+
+TEST(processor_vocoder_latency_reports_fft_size) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kShifterMode, 1.0f);
+    EXPECT(p.latencySamples() == PhaseVocoderPitchShifter::kFFTSize);
+}
+
+TEST(processor_granular_latency_unchanged) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kShifterMode, 0.0f);
+    // 30ms at 48kHz = 1440
+    EXPECT(p.latencySamples() == 1440);
+}
+
+TEST(perf_vocoder_48k_above_50x) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kShifterMode, 1.0f);
+    p.setParameter(kMix, 100.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 0.0, InterpolationType::Smooth);
+    curve->addBreakpoint(4.0, 12.0, InterpolationType::Smooth);
+    curve->commitEdit();
+
+    const int totalFrames = 48000 * 5;
+    const int blockSize = 512;
+    float left[512], right[512];
+    float* channels[2] = {left, right};
+
+    auto start = std::chrono::high_resolution_clock::now();
+    int processed = 0;
+    while (processed < totalFrames) {
+        fillSine(left, blockSize, 440.0, 48000.0);
+        fillSine(right, blockSize, 440.0, 48000.0);
+        p.process(channels, 2, blockSize);
+        processed += blockSize;
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    double wallSec = std::chrono::duration<double>(end - start).count();
+    double rt = (double(totalFrames) / 48000.0) / wallSec;
+    printf("[%.0fx] ", rt);
+    EXPECT(rt > 50.0);
+}
+
+TEST(perf_vocoder_memory_under_512kb) {
+    // Vocoder memory per channel should be < 512KB
+    int bytes = PhaseVocoderPitchShifter::kMemoryPerChannel * int(sizeof(double));
+    EXPECT(bytes < 512 * 1024);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Performance Regression Tests
 //
 // These tests enforce minimum performance floors. If a code change causes

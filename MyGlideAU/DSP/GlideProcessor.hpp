@@ -2,6 +2,7 @@
 #include "ParameterSmoother.hpp"
 #include "AutomationCurve.hpp"
 #include "GranularPitchShifter.hpp"
+#include "PhaseVocoderPitchShifter.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +14,7 @@ enum ParamAddress : uint64_t {
     kMix          = 1,   // Wet/dry mix (%)
     kPitchRange   = 2,   // Display range: 12 or 24 semitones
     kPitchOffset  = 3,   // DAW-automatable pitch offset (semitones, ±24)
+    kShifterMode  = 4,   // 0=Granular, 1=Vocoder
 };
 
 /// MIDI pitch automation processor.
@@ -22,10 +24,10 @@ enum ParamAddress : uint64_t {
 ///   - Reads beat position from host transport
 ///   - Evaluates AutomationCurve at current beat -> target semitones
 ///   - Smooths pitch via ParameterSmoother (glide time controls convergence)
-///   - Applies pitch shift via GranularPitchShifter
+///   - Applies pitch shift via GranularPitchShifter or PhaseVocoderPitchShifter
 ///   - Mixes wet/dry per the mix parameter
 ///
-/// RT-safe: single contiguous memory allocation in setUp(), no heap in process().
+/// RT-safe: contiguous memory allocations in setUp(), no heap in process().
 class GlideProcessor {
 public:
     GlideProcessor() = default;
@@ -36,7 +38,6 @@ public:
     GlideProcessor& operator=(const GlideProcessor&) = delete;
 
     void setUp(int32_t channelCount, double sampleRate) {
-        // Tear down any existing state first
         tearDown();
 
         mChannelCount = channelCount;
@@ -46,44 +47,54 @@ public:
         mSmGlideTime.configure(sampleRate);
         mSmMix.configure(sampleRate);
         mSmPitchOffset.configure(sampleRate);
-        mSmGlideTime.setTarget(50.0);    // 50ms default smoothing
-        mSmMix.setTarget(100.0);          // 100% wet default
-        mSmPitchOffset.setTarget(0.0);    // no DAW offset by default
+        mSmGlideTime.setTarget(50.0);
+        mSmMix.setTarget(100.0);
+        mSmPitchOffset.setTarget(0.0);
 
-        // Pitch smoother: initial convergence from default glide time
         mSmPitch.configure(sampleRate, 50.0);
         mSmPitch.setTarget(0.0);
         mLastGlideTimeMs = 50.0;
 
-        // Anti-aliasing filter state
         mAAFilterL = 0.0;
         mAAFilterR = 0.0;
 
-        // Allocate single contiguous memory block for:
-        //   - Pitch shifter circular buffers (0.5s per channel)
-        //   - Shared Hann window LUT (one copy, both channels use it)
+        int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
+
+        // ── Granular shifter memory ──────────────────────────────────────
         mPitchBufSize = static_cast<int32_t>(sampleRate * 0.5);
-        mGrainSamples = static_cast<int32_t>(0.030 * sampleRate);  // 30ms
+        mGrainSamples = static_cast<int32_t>(0.030 * sampleRate);
         if (mGrainSamples < 4) mGrainSamples = 4;
 
-        int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
-        int totalSamples = mPitchBufSize * clampedChannels + mGrainSamples;
+        int totalGranular = mPitchBufSize * clampedChannels + mGrainSamples;
+        mGranularMemory = new double[totalGranular]();
 
-        mMemory = new double[totalSamples]();
-
-        // Layout: [channel0 buffer | channel1 buffer | shared Hann LUT]
-        double* hannPtr = mMemory + mPitchBufSize * clampedChannels;
-
-        // Precompute shared Hann window (both channels use the same grain size)
+        double* hannGranular = mGranularMemory + mPitchBufSize * clampedChannels;
         for (int32_t i = 0; i < mGrainSamples; ++i) {
             double phase = static_cast<double>(i) / static_cast<double>(mGrainSamples);
-            hannPtr[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+            hannGranular[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
         }
 
-        // Configure pitch shifters with their slice of memory + shared Hann LUT
         for (int32_t ch = 0; ch < clampedChannels; ++ch) {
-            double* buf = mMemory + ch * mPitchBufSize;
-            mPitchShifters[ch].configure(buf, mPitchBufSize, hannPtr, mGrainSamples, sampleRate);
+            double* buf = mGranularMemory + ch * mPitchBufSize;
+            mGranularShifters[ch].configure(buf, mPitchBufSize, hannGranular, mGrainSamples, sampleRate);
+        }
+
+        // ── Phase vocoder memory ─────────────────────────────────────────
+        mFFTSize = PhaseVocoderPitchShifter::kFFTSize;
+        int32_t hannSizeVocoder = mFFTSize;
+        int32_t perChannel = PhaseVocoderPitchShifter::kMemoryPerChannel;
+        int totalVocoder = perChannel * clampedChannels + hannSizeVocoder;
+        mVocoderMemory = new double[totalVocoder]();
+
+        double* hannVocoder = mVocoderMemory + perChannel * clampedChannels;
+        for (int32_t i = 0; i < hannSizeVocoder; ++i) {
+            double phase = static_cast<double>(i) / static_cast<double>(hannSizeVocoder);
+            hannVocoder[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * phase));
+        }
+
+        for (int32_t ch = 0; ch < clampedChannels; ++ch) {
+            double* buf = mVocoderMemory + ch * perChannel;
+            mVocoderShifters[ch].configure(buf, perChannel, hannVocoder, mFFTSize, sampleRate);
         }
 
         // Reset MIDI state
@@ -93,8 +104,10 @@ public:
     }
 
     void tearDown() {
-        delete[] mMemory;
-        mMemory = nullptr;
+        delete[] mGranularMemory;
+        mGranularMemory = nullptr;
+        delete[] mVocoderMemory;
+        mVocoderMemory = nullptr;
     }
 
     void setParameter(uint64_t address, float value) {
@@ -103,6 +116,7 @@ public:
             case kMix:          mSmMix.setTarget(value);          break;
             case kPitchRange:   mPitchRange = static_cast<int>(value); break;
             case kPitchOffset:  mSmPitchOffset.setTarget(value);  break;
+            case kShifterMode:  mShifterMode = static_cast<int>(value); break;
         }
     }
 
@@ -112,6 +126,7 @@ public:
             case kMix:          return static_cast<float>(mSmMix.current());
             case kPitchRange:   return static_cast<float>(mPitchRange);
             case kPitchOffset:  return static_cast<float>(mSmPitchOffset.current());
+            case kShifterMode:  return static_cast<float>(mShifterMode);
         }
         return 0.0f;
     }
@@ -125,14 +140,12 @@ public:
 
         if (type == 0x90 && velocity > 0) {
             mActiveNotes[note] = velocity;
-            // Set bit
             if (note < 64)
                 mNoteBitmaskLo.fetch_or(1ULL << note, std::memory_order_relaxed);
             else
                 mNoteBitmaskHi.fetch_or(1ULL << (note - 64), std::memory_order_relaxed);
         } else if (type == 0x80 || (type == 0x90 && velocity == 0)) {
             mActiveNotes[note] = 0;
-            // Clear bit
             if (note < 64)
                 mNoteBitmaskLo.fetch_and(~(1ULL << note), std::memory_order_relaxed);
             else
@@ -150,15 +163,15 @@ public:
     // ── Process ──────────────────────────────────────────────────────────
 
     void process(float** buffers, int32_t channelCount, int32_t frameCount) {
-        if (!mMemory) return;
+        if (!mGranularMemory) return;
 
-        // Swap automation buffer if UI committed changes
         mAutomation.swapIfPending();
 
         double beatPos = mBeatPosition.load(std::memory_order_relaxed);
         double tempo = mTempo.load(std::memory_order_relaxed);
         double beatsPerSample = (tempo > 0.0) ? (tempo / 60.0 / mSampleRate) : 0.0;
         int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
+        const bool useVocoder = (mShifterMode == 1) && mVocoderMemory;
 
         for (int32_t frame = 0; frame < frameCount; ++frame) {
             const double glideTimeMs = mSmGlideTime.next();
@@ -167,31 +180,30 @@ public:
             const double wetGain = mix / 100.0;
             const double dryGain = 1.0 - wetGain;
 
-            // Update pitch smoother rate when glide time changes significantly.
             if (std::fabs(glideTimeMs - mLastGlideTimeMs) > 0.5) {
                 mSmPitch.updateCoefficient(mSampleRate, glideTimeMs);
                 mLastGlideTimeMs = glideTimeMs;
             }
 
-            // Evaluate automation curve + DAW pitch offset
             double targetSemitones = mAutomation.evaluate(beatPos) + pitchOffset;
             mSmPitch.setTarget(targetSemitones);
             double smoothedSemitones = mSmPitch.next();
 
-            // Anti-aliasing filter coefficient: lowpass cutoff adapts to pitch ratio.
-            // At +12 semitones (2x), Nyquist is halved, so cutoff = sampleRate/4.
-            // At 0 semitones, filter is wide open (coeff near 0 = no filtering).
             double ratio = std::pow(2.0, std::fabs(smoothedSemitones) / 12.0);
             double aaCoeff = (ratio > 1.05) ? std::min(0.9, 1.0 - 1.0 / ratio) : 0.0;
 
-            // Apply pitch shift to each channel
             for (int32_t ch = 0; ch < clampedChannels; ++ch) {
                 double input = static_cast<double>(buffers[ch][frame]) + 1e-20;
 
-                mPitchShifters[ch].setPitchSemitones(smoothedSemitones);
-                double wet = mPitchShifters[ch].process(input);
+                double wet;
+                if (useVocoder) {
+                    mVocoderShifters[ch].setPitchSemitones(smoothedSemitones);
+                    wet = mVocoderShifters[ch].process(input);
+                } else {
+                    mGranularShifters[ch].setPitchSemitones(smoothedSemitones);
+                    wet = mGranularShifters[ch].process(input);
+                }
 
-                // One-pole lowpass anti-aliasing filter on wet signal
                 if (aaCoeff > 0.0) {
                     double& state = (ch == 0) ? mAAFilterL : mAAFilterR;
                     state = state * aaCoeff + wet * (1.0 - aaCoeff);
@@ -204,7 +216,6 @@ public:
             beatPos += beatsPerSample;
         }
 
-        // Store updated beat position and display pitch for next block / UI
         mBeatPosition.store(beatPos, std::memory_order_relaxed);
         mDisplayPitch.store(mSmPitch.current(), std::memory_order_relaxed);
     }
@@ -213,28 +224,21 @@ public:
 
     void* automationCurvePtr() { return &mAutomation; }
 
-    uint64_t activeNoteBitmaskLo() const {
-        return mNoteBitmaskLo.load(std::memory_order_relaxed);
-    }
-    uint64_t activeNoteBitmaskHi() const {
-        return mNoteBitmaskHi.load(std::memory_order_relaxed);
-    }
-    double currentBeatPosition() const {
-        return mBeatPosition.load(std::memory_order_relaxed);
+    uint64_t activeNoteBitmaskLo() const { return mNoteBitmaskLo.load(std::memory_order_relaxed); }
+    uint64_t activeNoteBitmaskHi() const { return mNoteBitmaskHi.load(std::memory_order_relaxed); }
+    double currentBeatPosition() const { return mBeatPosition.load(std::memory_order_relaxed); }
+    double currentPitchSemitones() const { return mDisplayPitch.load(std::memory_order_relaxed); }
+
+    /// Latency in samples — depends on active shifter mode.
+    int32_t latencySamples() const {
+        if (mShifterMode == 1) return mFFTSize;
+        return mGrainSamples;
     }
 
-    /// Latency in samples introduced by the granular pitch shifter.
-    /// Logic Pro uses this for Plugin Delay Compensation (PDC).
-    int32_t latencySamples() const { return mGrainSamples; }
-
-    /// Tail time in seconds: how long audio rings out after input stops.
+    /// Tail time in seconds — depends on active shifter mode.
     double tailTimeSeconds() const {
-        return (mSampleRate > 0.0) ? (double(mGrainSamples) / mSampleRate) : 0.0;
-    }
-
-    /// Current smoothed pitch shift in semitones (for UI display).
-    double currentPitchSemitones() const {
-        return mDisplayPitch.load(std::memory_order_relaxed);
+        int32_t lat = latencySamples();
+        return (mSampleRate > 0.0) ? (static_cast<double>(lat) / mSampleRate) : 0.0;
     }
 
 private:
@@ -243,23 +247,29 @@ private:
     int32_t mChannelCount = 2;
     double  mSampleRate   = 48000.0;
     int     mPitchRange   = 24;
+    int     mShifterMode  = 0;  // 0=Granular, 1=Vocoder
 
     // Parameter smoothers
     ParameterSmoother mSmGlideTime;
     ParameterSmoother mSmMix;
-    ParameterSmoother mSmPitchOffset;  // DAW-automatable pitch offset
-    ParameterSmoother mSmPitch;        // smooths the combined automation + offset output
+    ParameterSmoother mSmPitchOffset;
+    ParameterSmoother mSmPitch;
     double mLastGlideTimeMs = 50.0;
 
-    // Anti-aliasing filter state (one-pole lowpass per channel)
+    // Anti-aliasing filter state
     double mAAFilterL = 0.0;
     double mAAFilterR = 0.0;
 
-    // Pitch shifting
-    GranularPitchShifter mPitchShifters[kMaxChannels];
-    double* mMemory      = nullptr;
+    // Granular pitch shifting
+    GranularPitchShifter mGranularShifters[kMaxChannels];
+    double* mGranularMemory = nullptr;
     int32_t mPitchBufSize = 0;
     int32_t mGrainSamples = 1440;
+
+    // Phase vocoder pitch shifting
+    PhaseVocoderPitchShifter mVocoderShifters[kMaxChannels];
+    double* mVocoderMemory = nullptr;
+    int32_t mFFTSize = PhaseVocoderPitchShifter::kFFTSize;
 
     // Automation curve (triple-buffered, lock-free)
     AutomationCurve mAutomation;
@@ -273,6 +283,6 @@ private:
     std::atomic<double> mBeatPosition{0.0};
     std::atomic<double> mTempo{120.0};
 
-    // Display (written once per block by audio thread, read by UI timer)
+    // Display
     std::atomic<double> mDisplayPitch{0.0};
 };

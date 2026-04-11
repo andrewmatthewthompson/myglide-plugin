@@ -62,6 +62,11 @@ public class GlideAudioUnit: AUAudioUnit {
 
         _parameterTree.implementorValueObserver = { [weak self] param, value in
             self?.kernel.setParameter(param.address, value: value)
+            // Notify host when shifter mode changes (latency changes with it)
+            if param.address == GlideParameters.Address.shifterMode.rawValue {
+                self?.willChangeValue(forKey: "latency")
+                self?.didChangeValue(forKey: "latency")
+            }
         }
 
         _parameterTree.implementorValueProvider = { [weak self] param in
@@ -75,6 +80,7 @@ public class GlideAudioUnit: AUAudioUnit {
             case 1: return String(format: "%.0f%%", value)
             case 2: return String(format: "\u{00B1}%.0f", value)
             case 3: return String(format: "%+.1f st", value)
+            case 4: return value < 0.5 ? "Granular" : "Vocoder"
             default: return String(format: "%.1f", value)
             }
         }

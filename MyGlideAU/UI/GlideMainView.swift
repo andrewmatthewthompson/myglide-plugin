@@ -192,6 +192,7 @@ class GlideParameterState: ObservableObject {
     @Published var mix: Double = 100.0
     @Published var pitchRange: Double = 24.0
     @Published var pitchOffset: Double = 0.0
+    @Published var shifterMode: Double = 0.0   // 0=Granular, 1=Vocoder
 
     private var parameterTree: AUParameterTree?
     private var observerToken: AUParameterObserverToken?
@@ -219,6 +220,7 @@ class GlideParameterState: ObservableObject {
         case 1: mix = value
         case 2: pitchRange = value
         case 3: pitchOffset = value
+        case 4: shifterMode = value
         default: break
         }
         isExternalUpdate = false
@@ -321,6 +323,19 @@ struct GlideMainView: View {
             .buttonStyle(.borderless)
             .foregroundColor(automation.canRedo ? .white : .white.opacity(0.2))
             .disabled(!automation.canRedo)
+
+            Divider().frame(height: 20).background(Color.white.opacity(0.3))
+
+            // Shifter mode (Granular / Vocoder)
+            Picker("", selection: Binding(
+                get: { Int(params.shifterMode) },
+                set: { params.sendIfLocal(4, value: Double($0)) }
+            )) {
+                Text("Granular").tag(0)
+                Text("Vocoder").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 140)
 
             Divider().frame(height: 20).background(Color.white.opacity(0.3))
 
