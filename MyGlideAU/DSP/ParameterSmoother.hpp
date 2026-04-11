@@ -35,6 +35,10 @@ public:
 
     double current() const { return mCurrent; }
 
+    /// Most recently requested target value. Useful for block-level
+    /// "is this parameter going to change this block?" decisions.
+    double target() const { return mTarget.load(std::memory_order_relaxed); }
+
     /// Advance N samples without producing output (fast skip).
     void advance(int32_t n) {
         double target = mTarget.load(std::memory_order_relaxed);
