@@ -82,6 +82,11 @@ public:
     int32_t latencySamples() const { return mProcessor.latencySamples(); }
     double tailTimeSeconds() const { return mProcessor.tailTimeSeconds(); }
 
+    double inputLevelL() const { return mProcessor.inputLevelL(); }
+    double inputLevelR() const { return mProcessor.inputLevelR(); }
+    double outputLevelL() const { return mProcessor.outputLevelL(); }
+    double outputLevelR() const { return mProcessor.outputLevelR(); }
+
     // ── Serialization (for preset save/load) ─────────────────────────────
 
     int automationSerialize(uint8_t* out, int maxBytes) {

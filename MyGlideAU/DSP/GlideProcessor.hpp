@@ -173,6 +173,23 @@ public:
         int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
         const bool useVocoder = (mShifterMode == 1) && mVocoderMemory;
 
+        // Capture input peak before processing
+        {
+            double pkL = 0.0, pkR = 0.0;
+            for (int32_t i = 0; i < frameCount; ++i) {
+                double a = std::fabs(static_cast<double>(buffers[0][i]));
+                if (a > pkL) pkL = a;
+            }
+            if (clampedChannels >= 2) {
+                for (int32_t i = 0; i < frameCount; ++i) {
+                    double a = std::fabs(static_cast<double>(buffers[1][i]));
+                    if (a > pkR) pkR = a;
+                }
+            } else { pkR = pkL; }
+            mInputLevelL.store(pkL, std::memory_order_relaxed);
+            mInputLevelR.store(pkR, std::memory_order_relaxed);
+        }
+
         for (int32_t frame = 0; frame < frameCount; ++frame) {
             const double glideTimeMs = mSmGlideTime.next();
             const double mix = mSmMix.next();
@@ -218,6 +235,23 @@ public:
 
         mBeatPosition.store(beatPos, std::memory_order_relaxed);
         mDisplayPitch.store(mSmPitch.current(), std::memory_order_relaxed);
+
+        // Capture output peak after processing
+        {
+            double pkL = 0.0, pkR = 0.0;
+            for (int32_t i = 0; i < frameCount; ++i) {
+                double a = std::fabs(static_cast<double>(buffers[0][i]));
+                if (a > pkL) pkL = a;
+            }
+            if (clampedChannels >= 2) {
+                for (int32_t i = 0; i < frameCount; ++i) {
+                    double a = std::fabs(static_cast<double>(buffers[1][i]));
+                    if (a > pkR) pkR = a;
+                }
+            } else { pkR = pkL; }
+            mOutputLevelL.store(pkL, std::memory_order_relaxed);
+            mOutputLevelR.store(pkR, std::memory_order_relaxed);
+        }
     }
 
     // ── Accessors for UI ─────────────────────────────────────────────────
@@ -228,6 +262,11 @@ public:
     uint64_t activeNoteBitmaskHi() const { return mNoteBitmaskHi.load(std::memory_order_relaxed); }
     double currentBeatPosition() const { return mBeatPosition.load(std::memory_order_relaxed); }
     double currentPitchSemitones() const { return mDisplayPitch.load(std::memory_order_relaxed); }
+
+    double inputLevelL() const { return mInputLevelL.load(std::memory_order_relaxed); }
+    double inputLevelR() const { return mInputLevelR.load(std::memory_order_relaxed); }
+    double outputLevelL() const { return mOutputLevelL.load(std::memory_order_relaxed); }
+    double outputLevelR() const { return mOutputLevelR.load(std::memory_order_relaxed); }
 
     /// Latency in samples — depends on active shifter mode.
     int32_t latencySamples() const {
@@ -285,4 +324,8 @@ private:
 
     // Display
     std::atomic<double> mDisplayPitch{0.0};
+    std::atomic<double> mInputLevelL{0.0};
+    std::atomic<double> mInputLevelR{0.0};
+    std::atomic<double> mOutputLevelL{0.0};
+    std::atomic<double> mOutputLevelR{0.0};
 };

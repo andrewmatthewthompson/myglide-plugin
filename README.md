@@ -20,7 +20,8 @@ notes, DJ risers, vocal effects, etc.
 - Anti-aliasing lowpass filter adapting to pitch ratio
 - ±48 semitone range, denormal guarding, RT-safe
 - Custom in-place radix-2 FFT (no Accelerate dependency — tests compile standalone)
-- 387 test assertions passing
+- Input/output peak level tracking (atomic, once per block)
+- 395 test assertions passing
 
 **Plugin**
 - AUv3 music effect (`aumf`) — receives both MIDI and audio
@@ -41,6 +42,7 @@ notes, DJ risers, vocal effects, etc.
 - **Beat subdivision snapping** (1/4, 1/8, 1/16) on X-axis, semitone snap on Y-axis
 - **Undo/redo** (50 levels, Cmd+Z / Cmd+Shift+Z, drag coalescing)
 - **Real-time pitch indicator** (+X.X st) in controls bar + dot on curve at playhead
+- **Input/output level meters** (stereo, green/gold/red, 30fps)
 - **Breakpoint selection** + Delete key
 - Playhead tracking at 30fps
 
@@ -116,7 +118,7 @@ c++ -std=c++17 -O2 -I MyGlideAU/DSP Tests/test_glide_dsp.cpp -o Tests/test_glide
 ./Tests/test_glide
 ```
 
-387 test assertions covering: AutomationCurve (breakpoints, interpolation,
+395 test assertions covering: AutomationCurve (breakpoints, interpolation,
 triple-buffer, serialization, edge cases), GranularPitchShifter (frequency
 accuracy via Goertzel, extreme values, tiny buffers), PhaseVocoderPitchShifter
 (FFT roundtrip, octave shift, mode switching, latency reporting),

@@ -243,6 +243,8 @@ struct GlideMainView: View {
     @State private var activeNoteMask: (UInt64, UInt64) = (0, 0)
     @State private var playheadBeat: Double = 0.0
     @State private var currentPitch: Double = 0.0
+    @State private var inputLevel: (Double, Double) = (0, 0)
+    @State private var outputLevel: (Double, Double) = (0, 0)
     @State private var displayTimer: Timer?
 
     // View range (zoom/scroll)
@@ -267,6 +269,20 @@ struct GlideMainView: View {
 
                     automationCanvas
                 }
+
+                // Input/output level meters
+                HStack(spacing: 0) {
+                    Spacer().frame(width: 50)
+                    VStack(spacing: 1) {
+                        LevelMeterBar(level: inputLevel.0, label: "IN L")
+                        LevelMeterBar(level: inputLevel.1, label: "IN R")
+                        LevelMeterBar(level: outputLevel.0, label: "OUT L")
+                        LevelMeterBar(level: outputLevel.1, label: "OUT R")
+                    }
+                    .padding(.horizontal, 4)
+                }
+                .frame(height: 22)
+                .background(Color(red: 0.06, green: 0.08, blue: 0.14))
 
                 beatRuler
                     .frame(height: 24)
@@ -826,6 +842,41 @@ struct GlideMainView: View {
             )
             playheadBeat = audioUnit.kernel.currentBeatPosition()
             currentPitch = audioUnit.kernel.currentPitchSemitones()
+            inputLevel = (audioUnit.kernel.inputLevelL(), audioUnit.kernel.inputLevelR())
+            outputLevel = (audioUnit.kernel.outputLevelL(), audioUnit.kernel.outputLevelR())
+        }
+    }
+}
+
+// MARK: - Level Meter Bar
+
+private struct LevelMeterBar: View {
+    let level: Double
+    let label: String
+
+    private var clampedLevel: Double { min(1.0, max(0.0, level)) }
+
+    private var meterColor: Color {
+        if level > 0.9 { return Color(red: 0.95, green: 0.3, blue: 0.2) }
+        if level > 0.6 { return Color(red: 1.0, green: 0.70, blue: 0.25) }
+        return Color(red: 0.3, green: 0.8, blue: 0.4)
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 7, weight: .medium, design: .monospaced))
+                .foregroundColor(.white.opacity(0.3))
+                .frame(width: 18, alignment: .trailing)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color.white.opacity(0.06))
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(meterColor.opacity(0.8))
+                        .frame(width: geo.size.width * clampedLevel)
+                }
+            }
         }
     }
 }

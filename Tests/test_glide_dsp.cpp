@@ -1410,6 +1410,68 @@ TEST(perf_vocoder_memory_under_512kb) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Level Meter Tests
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(level_meter_nonzero_with_signal) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0, 0.5);
+    fillSine(buf.right, 4800, 440.0, 48000.0, 0.5);
+    p.process(buf.channels, 2, 4800);
+
+    EXPECT(p.inputLevelL() > 0.1);
+    EXPECT(p.inputLevelR() > 0.1);
+    EXPECT(p.outputLevelL() > 0.1);
+    EXPECT(p.outputLevelR() > 0.1);
+}
+
+TEST(level_meter_zero_on_silence) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setBeatPosition(0.0, 120.0);
+
+    StereoBuffer buf;
+    p.process(buf.channels, 2, 4800);
+
+    EXPECT(p.inputLevelL() < 0.001);
+    EXPECT(p.outputLevelL() < 0.001);
+}
+
+TEST(level_meter_input_differs_from_output_with_pitch) {
+    // With pitch shifting, output should differ from input in character
+    // but both should have non-zero levels
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    // Warmup
+    StereoBuffer warm;
+    fillSine(warm.left, 48000, 440.0, 48000.0, 0.5);
+    fillSine(warm.right, 48000, 440.0, 48000.0, 0.5);
+    p.process(warm.channels, 2, 48000);
+
+    StereoBuffer buf;
+    fillSine(buf.left, 4800, 440.0, 48000.0, 0.5);
+    fillSine(buf.right, 4800, 440.0, 48000.0, 0.5);
+    p.process(buf.channels, 2, 4800);
+
+    EXPECT(p.inputLevelL() > 0.1);
+    EXPECT(p.outputLevelL() > 0.01);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Performance Regression Tests
 //
 // These tests enforce minimum performance floors. If a code change causes

@@ -35,6 +35,12 @@
 - (double)currentBeatPosition;
 - (double)currentPitchSemitones;
 
+// Level meters (peak per block, for UI)
+- (double)inputLevelL;
+- (double)inputLevelR;
+- (double)outputLevelL;
+- (double)outputLevelR;
+
 // Latency and tail time
 - (int32_t)latencySamples;
 - (double)tailTimeSeconds;

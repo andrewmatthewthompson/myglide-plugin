@@ -79,6 +79,11 @@
 - (double)currentBeatPosition { return _kernel.currentBeatPosition(); }
 - (double)currentPitchSemitones { return _kernel.currentPitchSemitones(); }
 
+- (double)inputLevelL { return _kernel.inputLevelL(); }
+- (double)inputLevelR { return _kernel.inputLevelR(); }
+- (double)outputLevelL { return _kernel.outputLevelL(); }
+- (double)outputLevelR { return _kernel.outputLevelR(); }
+
 - (int32_t)latencySamples { return _kernel.latencySamples(); }
 - (double)tailTimeSeconds { return _kernel.tailTimeSeconds(); }
 
