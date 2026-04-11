@@ -186,12 +186,13 @@ public:
     // ── Process ──────────────────────────────────────────────────────────
 
     void process(float** buffers, int32_t channelCount, int32_t frameCount) {
-        if (!mGranularMemory) return;
+        if (!mGranularMemory || !buffers || frameCount <= 0) return;
+        if (!buffers[0]) return;
 
         mAutomation.swapIfPending();
 
         double beatPos = mBeatPosition.load(std::memory_order_relaxed);
-        double tempo = mTempo.load(std::memory_order_relaxed);
+        double tempo = std::max(0.0, mTempo.load(std::memory_order_relaxed));
         double beatsPerSample = (tempo > 0.0) ? (tempo / 60.0 / mSampleRate) : 0.0;
         int32_t clampedChannels = std::min(channelCount, static_cast<int32_t>(kMaxChannels));
         const bool useVocoder = (mShifterMode == 1) && mVocoderMemory;
@@ -212,6 +213,10 @@ public:
             mInputLevelL.store(pkL, std::memory_order_relaxed);
             mInputLevelR.store(pkR, std::memory_order_relaxed);
         }
+
+        // Anti-aliasing filter coefficient: computed once per block (not per sample).
+        // Updated at the end of the block based on final smoothed semitones.
+        double aaCoeff = mCachedAACoeff;
 
         for (int32_t frame = 0; frame < frameCount; ++frame) {
             const double glideTimeMs = mSmGlideTime.next();
@@ -234,9 +239,6 @@ public:
             }
             mSmPitch.setTarget(targetSemitones);
             double smoothedSemitones = mSmPitch.next();
-
-            double ratio = std::pow(2.0, std::fabs(smoothedSemitones) / 12.0);
-            double aaCoeff = (ratio > 1.05) ? std::min(0.9, 1.0 - 1.0 / ratio) : 0.0;
 
             for (int32_t ch = 0; ch < clampedChannels; ++ch) {
                 double input = static_cast<double>(buffers[ch][frame]) + 1e-20;
@@ -265,6 +267,13 @@ public:
         mBeatPosition.store(beatPos, std::memory_order_relaxed);
         mDisplayPitch.store(mSmPitch.current(), std::memory_order_relaxed);
 
+        // Update cached AA coefficient for next block (avoids pow() per sample)
+        {
+            double semi = std::fabs(mSmPitch.current());
+            double ratio = std::pow(2.0, semi / 12.0);
+            mCachedAACoeff = (ratio > 1.05) ? std::min(0.9, 1.0 - 1.0 / ratio) : 0.0;
+        }
+
         // Capture output peak after processing
         {
             double pkL = 0.0, pkR = 0.0;
@@ -285,7 +294,7 @@ public:
 
     // ── Accessors for UI ─────────────────────────────────────────────────
 
-    void* automationCurvePtr() { return &mAutomation; }
+    AutomationCurve* automationCurvePtr() { return &mAutomation; }
 
     uint64_t activeNoteBitmaskLo() const { return mNoteBitmaskLo.load(std::memory_order_relaxed); }
     uint64_t activeNoteBitmaskHi() const { return mNoteBitmaskHi.load(std::memory_order_relaxed); }
@@ -343,6 +352,7 @@ private:
     // Anti-aliasing filter state
     double mAAFilterL = 0.0;
     double mAAFilterR = 0.0;
+    double mCachedAACoeff = 0.0;  // computed once per block, not per sample
 
     // Granular pitch shifting
     GranularPitchShifter mGranularShifters[kMaxChannels];

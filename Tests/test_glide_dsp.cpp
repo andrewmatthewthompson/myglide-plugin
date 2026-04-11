@@ -621,7 +621,7 @@ TEST(processor_automation_affects_pitch) {
     p.setBeatPosition(0.0, 120.0);
 
     // Add +12 semitone automation at beat 0
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
     curve->commitEdit();
@@ -683,7 +683,7 @@ TEST(bug_smoother_glide_time_change_no_pitch_jump) {
     p.setBeatPosition(0.0, 120.0);
 
     // Set automation to +12 semitones
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
     curve->commitEdit();
@@ -842,7 +842,7 @@ TEST(bug_processor_automation_with_corrupted_semitones) {
     p.setParameter(kGlideTime, 1.0f);
     p.setBeatPosition(0.0, 120.0);
 
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 500.0, InterpolationType::Linear);  // way out of range
     curve->commitEdit();
@@ -887,7 +887,7 @@ TEST(bug_processor_very_large_beat_position) {
     p.setUp(2, 48000.0);
     p.setBeatPosition(100000.0, 120.0);
 
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 0.0, InterpolationType::Linear);
     curve->addBreakpoint(16.0, 12.0, InterpolationType::Linear);
@@ -1049,7 +1049,7 @@ TEST(processor_display_pitch_updates) {
     p.setBeatPosition(0.0, 120.0);
 
     // Add +12 automation
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
     curve->commitEdit();
@@ -1124,7 +1124,7 @@ TEST(bypass_passes_audio_through_unmodified) {
     p.setBeatPosition(0.0, 120.0);
 
     // Add pitch automation that would shift audio if processed
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
     curve->commitEdit();
@@ -1377,7 +1377,7 @@ TEST(perf_vocoder_48k_above_50x) {
     p.setParameter(kMix, 100.0f);
     p.setBeatPosition(0.0, 120.0);
 
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 0.0, InterpolationType::Smooth);
     curve->addBreakpoint(4.0, 12.0, InterpolationType::Smooth);
@@ -1451,7 +1451,7 @@ TEST(level_meter_input_differs_from_output_with_pitch) {
     p.setParameter(kGlideTime, 1.0f);
     p.setBeatPosition(0.0, 120.0);
 
-    auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+    auto* curve = p.automationCurvePtr();
     curve->beginEdit();
     curve->addBreakpoint(0.0, 12.0, InterpolationType::Linear);
     curve->commitEdit();
@@ -1656,7 +1656,7 @@ static double measureRealtimeMultiplier(double sampleRate, int blockSize, int ch
     p.setBeatPosition(0.0, 120.0);
 
     if (withAutomation) {
-        auto* curve = static_cast<AutomationCurve*>(p.automationCurvePtr());
+        auto* curve = p.automationCurvePtr();
         curve->beginEdit();
         curve->addBreakpoint(0.0, 0.0, InterpolationType::Smooth);
         curve->addBreakpoint(4.0, pitchSemi, InterpolationType::Smooth);

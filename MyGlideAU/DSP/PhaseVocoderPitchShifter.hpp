@@ -54,6 +54,8 @@ public:
         mSampleRate = sampleRate;
         mHannWindow = hannPtr;
 
+        if (bufferSize < kMemoryPerChannel) return;  // insufficient memory
+
         // Carve up the contiguous block
         double* ptr = bufferPtr;
         mInputRing   = ptr; ptr += kFFTSize;
@@ -173,10 +175,12 @@ private:
 
         // === SYNTHESIS ===
 
-        // 5. Accumulate synthesis phase
+        // 5. Accumulate synthesis phase (wrap to prevent precision loss over long sessions)
         for (int32_t k = 0; k < kHalfFFT; ++k) {
             double phaseInc = twoPi * shiftedFreq[k] / mSampleRate * static_cast<double>(kHopSize);
             mSynthPhase[k] += phaseInc;
+            // Wrap to [0, 2*pi) to prevent float drift after hours of playback
+            mSynthPhase[k] -= twoPi * std::floor(mSynthPhase[k] / twoPi);
         }
 
         // 6. Convert back to Cartesian
@@ -218,12 +222,13 @@ public:
             int32_t halfStage = stage / 2;
             double angleStep = (inverse ? 1.0 : -1.0) * 2.0 * M_PI / static_cast<double>(stage);
 
-            for (int32_t group = 0; group < n; group += stage) {
-                for (int32_t k = 0; k < halfStage; ++k) {
-                    double angle = angleStep * static_cast<double>(k);
-                    double twR = std::cos(angle);
-                    double twI = std::sin(angle);
+            // Twiddle factor rotation: compute cos/sin once per stage, then rotate
+            double wR = std::cos(angleStep);
+            double wI = std::sin(angleStep);
 
+            for (int32_t group = 0; group < n; group += stage) {
+                double twR = 1.0, twI = 0.0;  // twiddle starts at 1+0i
+                for (int32_t k = 0; k < halfStage; ++k) {
                     int32_t even = group + k;
                     int32_t odd  = group + k + halfStage;
 
@@ -234,6 +239,11 @@ public:
                     imag[odd]  = imag[even] - tmpI;
                     real[even] += tmpR;
                     imag[even] += tmpI;
+
+                    // Rotate twiddle factor: (twR + i*twI) *= (wR + i*wI)
+                    double newTwR = twR * wR - twI * wI;
+                    twI = twR * wI + twI * wR;
+                    twR = newTwR;
                 }
             }
         }

@@ -42,27 +42,27 @@ public:
     // ── Automation curve bridge (called from UI thread via Obj-C) ────────
 
     void automationBeginEdit() {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         curve->beginEdit();
     }
 
     void automationAddBreakpoint(double beat, double semitones, uint8_t interpType) {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         curve->addBreakpoint(beat, semitones, static_cast<InterpolationType>(interpType));
     }
 
     void automationRemoveBreakpoint(int index) {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         curve->removeBreakpoint(index);
     }
 
     void automationMoveBreakpoint(int index, double beat, double semitones) {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         curve->moveBreakpoint(index, beat, semitones);
     }
 
     void automationClear() {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         // No beginEdit() here — caller must have already called automationBeginEdit().
         // Calling beginEdit() again would pick a potentially different write buffer,
         // discarding any work done since the first beginEdit().
@@ -70,7 +70,7 @@ public:
     }
 
     void automationCommitEdit() {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         curve->commitEdit();
     }
 
@@ -91,24 +91,24 @@ public:
     // ── Serialization (for preset save/load) ─────────────────────────────
 
     int automationSerialize(uint8_t* out, int maxBytes) {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         return curve->serialize(out, maxBytes);
     }
 
     void automationDeserialize(const uint8_t* data, int length) {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         curve->beginEdit();
         curve->deserialize(data, length);
         curve->commitEdit();
     }
 
     int automationBreakpointCount() {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         return curve->count();
     }
 
     void automationBreakpointAt(int index, double* beat, double* semitones, uint8_t* interpType) {
-        auto* curve = static_cast<AutomationCurve*>(mProcessor.automationCurvePtr());
+        auto* curve = mProcessor.automationCurvePtr();
         const Breakpoint* pts = nullptr;
         int count = curve->getBreakpoints(&pts);
         if (index >= 0 && index < count && pts) {

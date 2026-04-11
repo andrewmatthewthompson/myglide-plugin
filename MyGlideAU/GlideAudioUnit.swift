@@ -35,10 +35,21 @@ public class GlideAudioUnit: AUAudioUnit {
 
     // MARK: - Bypass
 
-    private var _shouldBypassEffect = false
+    // Heap-allocated bypass flag: safe to capture in the render block closure.
+    // Using UnsafeMutablePointer avoids the undefined behavior of capturing &storedProperty.
+    private let _bypassFlag: UnsafeMutablePointer<Bool> = {
+        let ptr = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+        ptr.initialize(to: false)
+        return ptr
+    }()
     public override var shouldBypassEffect: Bool {
-        get { return _shouldBypassEffect }
-        set { _shouldBypassEffect = newValue }
+        get { return _bypassFlag.pointee }
+        set { _bypassFlag.pointee = newValue }
+    }
+
+    deinit {
+        _bypassFlag.deinitialize(count: 1)
+        _bypassFlag.deallocate()
     }
 
     // MARK: - Init
@@ -198,7 +209,7 @@ public class GlideAudioUnit: AUAudioUnit {
     public override var internalRenderBlock: AUInternalRenderBlock {
         let kernRef = Unmanaged.passUnretained(kernel)
         let musicalContext = self.musicalContextBlock
-        let bypassRef = UnsafeMutablePointer<Bool>(&_shouldBypassEffect)
+        let bypassRef = _bypassFlag
 
         return { actionFlags, timestamp, frameCount, outputBusNumber,
                  outputData, realtimeEventListHead, pullInputBlock in
