@@ -220,74 +220,18 @@ public:
             mInputLevelR.store(pkR, std::memory_order_relaxed);
         }
 
-        // ── True bypass when there is nothing to do ──────────────────
-        //
-        // The pitch-shifting engines (granular + phase vocoder) both
-        // colour the signal even at unity ratio: the granular shifter
-        // outputs a ~60 ms delayed Hann-windowed mix of two grains, and
-        // the phase vocoder adds FFT/IFFT smearing. If we're completely
-        // idle (current pitch = 0, target pitch = 0, pitch offset = 0,
-        // and the automation curve evaluates to 0 across the whole
-        // block), bypass the engines entirely and leave the input
-        // buffer untouched — the plugin should be transparent when it
-        // has no work to do.
-        {
-            // Evaluate effective semitone target at the start and end of
-            // this block. If both are ~0 AND we're already smoothed to
-            // zero, we can safely skip the shifters.
-            const double pitchOffsetCurrent = mSmPitchOffset.current();
-            const double pitchOffsetTarget  = mSmPitchOffset.target();
-
-            double beginTarget = 0.0, endTarget = 0.0;
-            if (mAutoGlide) {
-                const double g = mAutoGlideTarget.load(std::memory_order_relaxed);
-                beginTarget = g;
-                endTarget   = g;
-            } else {
-                double e1 = beatPos;
-                double e2 = beatPos + beatsPerSample * frameCount;
-                if (mLoopEnabled && mLoopBeats > 0.0) {
-                    e1 = std::fmod(e1, mLoopBeats); if (e1 < 0.0) e1 += mLoopBeats;
-                    e2 = std::fmod(e2, mLoopBeats); if (e2 < 0.0) e2 += mLoopBeats;
-                }
-                beginTarget = mAutomation.evaluate(e1);
-                endTarget   = mAutomation.evaluate(e2);
-            }
-
-            constexpr double kBypassEpsilon = 0.005;  // ~half a cent
-            const bool bypassOK =
-                std::fabs(beginTarget + pitchOffsetCurrent) < kBypassEpsilon &&
-                std::fabs(endTarget   + pitchOffsetTarget)  < kBypassEpsilon &&
-                std::fabs(mSmPitch.current())                < kBypassEpsilon &&
-                std::fabs(mSmPitch.target())                 < kBypassEpsilon;
-
-            if (bypassOK) {
-                // Advance transport + parameter smoothers so state stays
-                // consistent with elapsed time (they're cheap).
-                for (int32_t i = 0; i < frameCount; ++i) {
-                    (void)mSmGlideTime.next();
-                    (void)mSmMix.next();
-                    (void)mSmPitchOffset.next();
-                }
-                beatPos += beatsPerSample * static_cast<double>(frameCount);
-                mBeatPosition.store(beatPos, std::memory_order_relaxed);
-                mDisplayPitch.store(0.0, std::memory_order_relaxed);
-
-                // Output == input in true bypass, so the output meters
-                // can mirror the input meters we just captured.
-                mOutputLevelL.store(mInputLevelL.load(std::memory_order_relaxed),
-                                    std::memory_order_relaxed);
-                mOutputLevelR.store(mInputLevelR.load(std::memory_order_relaxed),
-                                    std::memory_order_relaxed);
-
-                // Clear the AA filter tail so it doesn't pop next time
-                // processing resumes.
-                mAAFilterL = 0.0;
-                mAAFilterR = 0.0;
-                mCachedAACoeff = 0.0;
-                return;
-            }
-        }
+        // NOTE: we used to bypass the entire engine when the pitch was
+        // near zero, but that made the effective latency jump between
+        // 0 (bypass) and `grainSamples` (active) — Logic Pro's latency
+        // compensation then pulled the bypass output 30 ms ahead of
+        // real time while the active output stayed in sync, so every
+        // automation transition caused a 30 ms timing shift that the
+        // ear reads as "delayed / sound-changes". The granular shifter
+        // is now transparent at unity ratio (both grains start at the
+        // same age and Hann-overlap sums to the identity), so we just
+        // let it run all the time with a constant, latency-compensated
+        // delay regardless of whether pitch shifting is actually
+        // happening.
 
         // Anti-aliasing filter coefficient: computed once per block (not per sample).
         // Updated at the end of the block based on final smoothed semitones.

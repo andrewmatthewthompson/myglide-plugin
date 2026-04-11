@@ -42,14 +42,31 @@ public:
         mPitchRatio = 1.0;
         mLastSemitones = 0.0;
 
-        // Initialize two grains at 50% phase offset
-        double initAge = static_cast<double>(mGrainSamples) * 2.0;
+        // Two grains at 50% phase offset but starting at the SAME age.
+        // Hann windows at 50% overlap sum to exactly 1, so as long as
+        // the grains read from the same delay position the output at
+        // unity pitch is a clean `mGrainSamples`-sample delayed copy
+        // of the input — which is what the `latencySamples()` value
+        // promises the host. Using different initial ages (as before)
+        // made the grains read from different delays, so their sum
+        // comb-filtered the signal even at ratio 1.
+        const double restingAge = static_cast<double>(mGrainSamples);
         mGrains[0].phase = 0.0;
         mGrains[0].sampleIndex = 0;
-        mGrains[0].age = initAge;
+        mGrains[0].age = restingAge;
         mGrains[1].phase = 0.5;
         mGrains[1].sampleIndex = mGrainSamples / 2;
-        mGrains[1].age = initAge + mGrainSamples * 0.5;
+        mGrains[1].age = restingAge;
+    }
+
+    /// Write a single input sample into the ring buffer without performing
+    /// grain reads. Used by GlideProcessor during the block-level bypass
+    /// path so the buffer stays fresh and the shifter can resume without
+    /// a stale-audio pop when pitch shifting re-engages.
+    void writeInputOnly(double input) {
+        if (!mBuffer || mBufferSize == 0) return;
+        mBuffer[mWritePos] = input;
+        mWritePos = (mWritePos + 1) % mBufferSize;
     }
 
     /// Set pitch shift in semitones. 0 = no shift, +12 = octave up, -12 = octave down.
