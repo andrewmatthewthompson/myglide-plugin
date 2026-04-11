@@ -36,12 +36,431 @@ private enum PianoKey {
     }
 }
 
+// MARK: - Coordinate geometry
+//
+// Pulled out of GlideMainView so the rendering subviews below don't need
+// to reach back into it. `CurveGeometry` is a pure value type so the
+// whole chain stays Equatable-friendly.
+private struct CurveGeometry: Equatable {
+    var viewStartBeat: Double
+    var viewBeats: Double
+    var noteRangeLow: Int
+    var noteRangeHigh: Int
+
+    func beatToX(_ beat: Double, width: CGFloat) -> CGFloat {
+        CGFloat((beat - viewStartBeat) / viewBeats) * width
+    }
+
+    func xToBeat(_ x: CGFloat, width: CGFloat) -> Double {
+        viewStartBeat + Double(x / width) * viewBeats
+    }
+
+    func semitonesToY(_ semi: Double, height: CGFloat) -> CGFloat {
+        let midNote = Double(noteRangeLow + noteRangeHigh) / 2.0
+        let range = Double(noteRangeHigh - noteRangeLow)
+        let noteInRange = midNote + semi
+        let normalized = (Double(noteRangeHigh) - noteInRange) / range
+        return CGFloat(normalized) * height
+    }
+
+    func yToSemitones(_ y: CGFloat, height: CGFloat) -> Double {
+        let range = Double(noteRangeHigh - noteRangeLow)
+        let normalized = Double(y / height)
+        let noteInRange = Double(noteRangeHigh) - normalized * range
+        let midNote = Double(noteRangeLow + noteRangeHigh) / 2.0
+        return noteInRange - midNote
+    }
+}
+
+/// Curve evaluator extracted as a free function so both the main view's
+/// gesture handling and the extracted rendering subviews can use it
+/// without reaching into the view hierarchy.
+private func evaluateCurveValue(bps: [AutomationState.UIBreakpoint], at beat: Double) -> Double {
+    guard !bps.isEmpty else { return 0 }
+    if bps.count == 1 { return bps[0].semitones }
+    if beat <= bps[0].beat { return bps[0].semitones }
+    if beat >= bps[bps.count - 1].beat { return bps[bps.count - 1].semitones }
+
+    var lo = 0, hi = bps.count - 1
+    while lo < hi - 1 {
+        let mid = (lo + hi) / 2
+        if bps[mid].beat <= beat { lo = mid } else { hi = mid }
+    }
+
+    let a = bps[lo], b = bps[hi]
+    let span = b.beat - a.beat
+    guard span > 1e-9 else { return a.semitones }
+    let t = (beat - a.beat) / span
+
+    switch a.interpType {
+    case 2: return a.semitones
+    case 1:
+        let s = t * t * (3.0 - 2.0 * t)
+        return a.semitones + (b.semitones - a.semitones) * s
+    default:
+        return a.semitones + (b.semitones - a.semitones) * t
+    }
+}
+
+// MARK: - Piano Sidebar (extracted subview)
+//
+// Kept as its own `Equatable` SwiftUI struct so the 30 Hz display timer
+// on GlideMainView — which mutates playhead beat / levels / pitch — can
+// re-run GlideMainView.body without rebuilding the piano Canvas. SwiftUI's
+// diffing compares this struct's stored properties and short-circuits
+// when they haven't changed, which is the common case.
+private struct PianoSidebarView: View, Equatable {
+    let maskLo: UInt64
+    let maskHi: UInt64
+    let noteRangeLow: Int
+    let noteRangeHigh: Int
+
+    var body: some View {
+        Canvas(opaque: true, rendersAsynchronously: false) { context, size in
+            draw(context: &context, size: size)
+        }
+    }
+
+    private func draw(context: inout GraphicsContext, size: CGSize) {
+        let noteCount = noteRangeHigh - noteRangeLow
+        guard noteCount > 0 else { return }
+
+        let semitoneHeight = size.height / CGFloat(noteCount)
+        let width = size.width
+
+        // Flat palette — no gradients / shadows.
+        let whiteFill          = Color(white: 0.92)
+        let whiteActiveFill    = Color(red: 0.55, green: 0.88, blue: 1.00)
+        let blackFill          = Color.black
+        let blackActiveFill    = Color(red: 0.14, green: 0.42, blue: 0.60)
+        let dividerColor       = Color.black.opacity(0.30)
+        let labelColor         = Color(white: 0.22)
+
+        let cornerRadius: CGFloat = 3
+        let keyInsetY: CGFloat = 0.5
+        let blackKeyWidth = width * 0.58
+        let blackHeightFraction: CGFloat = 0.68
+
+        // Backdrop
+        context.fill(
+            Path(CGRect(origin: .zero, size: size)),
+            with: .color(Color(red: 0.03, green: 0.04, blue: 0.06))
+        )
+
+        // White keys
+        for i in 0..<noteCount {
+            let midi = noteRangeHigh - 1 - i
+            if PianoKey.isBlack(midi: midi) { continue }
+
+            let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
+            let y = CGFloat(i) * semitoneHeight + keyInsetY
+            let h = max(semitoneHeight - (keyInsetY * 2), 1)
+            let rect = CGRect(x: 0, y: y, width: width, height: h)
+            let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
+            context.fill(path, with: .color(active ? whiteActiveFill : whiteFill))
+
+            if midi % 12 == 0 {
+                let label = Text(PianoKey.octaveLabel(midi: midi))
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundColor(labelColor)
+                context.draw(label, at: CGPoint(x: width - 6, y: y + h / 2), anchor: .trailing)
+            }
+        }
+
+        // Divider lines between adjacent white keys, in a single stroke.
+        let dividerPath = Path { p in
+            for i in 0..<noteCount {
+                let midi = noteRangeHigh - 1 - i
+                if PianoKey.isBlack(midi: midi) { continue }
+                let y = CGFloat(i + 1) * semitoneHeight
+                p.move(to: CGPoint(x: 0, y: y))
+                p.addLine(to: CGPoint(x: width, y: y))
+            }
+        }
+        context.stroke(dividerPath, with: .color(dividerColor), lineWidth: 0.5)
+
+        // Black keys (shorter than white keys, centred in their row).
+        for i in 0..<noteCount {
+            let midi = noteRangeHigh - 1 - i
+            if !PianoKey.isBlack(midi: midi) { continue }
+
+            let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
+            let rowY = CGFloat(i) * semitoneHeight
+            let h = max(semitoneHeight * blackHeightFraction, 1)
+            let y = rowY + (semitoneHeight - h) / 2
+            let rect = CGRect(x: 0, y: y, width: blackKeyWidth, height: h)
+            let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
+            context.fill(path, with: .color(active ? blackActiveFill : blackFill))
+        }
+    }
+}
+
+// MARK: - Automation Static Layer (extracted subview)
+//
+// Renders everything that only changes when the user edits the curve or
+// pans/zooms: grid, curves, breakpoints, loop region. By splitting this
+// out of the main canvas, the 30 Hz display timer no longer causes the
+// whole curve to be re-evaluated 900+ times per frame — the layer's
+// `Equatable` conformance lets SwiftUI skip the whole Canvas when none
+// of its inputs changed.
+private struct AutomationStaticLayer: View, Equatable {
+    let breakpoints: [AutomationState.UIBreakpoint]
+    let selectedIndex: Int?
+    let snapEnabled: Bool
+    let beatSnapDivision: Double
+    let loopEnabled: Bool
+    let loopBeats: Double
+    let geometry: CurveGeometry
+
+    var body: some View {
+        Canvas(rendersAsynchronously: false) { context, size in
+            drawGrid(context: &context, size: size)
+            drawLoopRegion(context: &context, size: size)
+            drawCurves(context: &context, size: size)
+            drawBreakpoints(context: &context, size: size)
+        }
+    }
+
+    private func drawGrid(context: inout GraphicsContext, size: CGSize) {
+        let noteCount = geometry.noteRangeHigh - geometry.noteRangeLow
+        let noteHeight = size.height / CGFloat(noteCount)
+
+        // Horizontal note lines: batch into two paths (C lines vs. others)
+        // so we only stroke twice instead of `noteCount` times.
+        var cPath = Path()
+        var otherPath = Path()
+        for i in 0...noteCount {
+            let y = CGFloat(i) * noteHeight
+            let midi = geometry.noteRangeHigh - i
+            if midi % 12 == 0 {
+                cPath.move(to: CGPoint(x: 0, y: y))
+                cPath.addLine(to: CGPoint(x: size.width, y: y))
+            } else {
+                otherPath.move(to: CGPoint(x: 0, y: y))
+                otherPath.addLine(to: CGPoint(x: size.width, y: y))
+            }
+        }
+        context.stroke(otherPath, with: .color(.white.opacity(0.05)), lineWidth: 0.25)
+        context.stroke(cPath, with: .color(.white.opacity(0.15)), lineWidth: 0.5)
+
+        // Vertical beat grid: batch into three buckets (bar / beat / tick)
+        // so we stroke three paths total regardless of how many ticks.
+        let tickInterval: Double
+        if geometry.viewBeats <= 8 { tickInterval = 0.25 }
+        else if geometry.viewBeats <= 16 { tickInterval = 0.5 }
+        else if geometry.viewBeats <= 32 { tickInterval = 1.0 }
+        else { tickInterval = 2.0 }
+
+        var barPath = Path()
+        var beatPath = Path()
+        var tickPath = Path()
+        let firstTick = (geometry.viewStartBeat / tickInterval).rounded(.up) * tickInterval
+        var tick = firstTick
+        while tick <= geometry.viewStartBeat + geometry.viewBeats {
+            let x = geometry.beatToX(tick, width: size.width)
+            let isBar = tick.truncatingRemainder(dividingBy: 4) == 0
+            let isBeat = tick.truncatingRemainder(dividingBy: 1) == 0
+            if isBar {
+                barPath.move(to: CGPoint(x: x, y: 0))
+                barPath.addLine(to: CGPoint(x: x, y: size.height))
+            } else if isBeat {
+                beatPath.move(to: CGPoint(x: x, y: 0))
+                beatPath.addLine(to: CGPoint(x: x, y: size.height))
+            } else {
+                tickPath.move(to: CGPoint(x: x, y: 0))
+                tickPath.addLine(to: CGPoint(x: x, y: size.height))
+            }
+            tick += tickInterval
+        }
+        context.stroke(tickPath, with: .color(.white.opacity(0.04)), lineWidth: 0.25)
+        context.stroke(beatPath, with: .color(.white.opacity(0.08)), lineWidth: 0.25)
+        context.stroke(barPath, with: .color(.white.opacity(0.20)), lineWidth: 0.5)
+
+        // Beat snap grid overlay (optional, already rare)
+        if snapEnabled && beatSnapDivision > 0 && beatSnapDivision < tickInterval {
+            var snapPath = Path()
+            let firstSnap = (geometry.viewStartBeat / beatSnapDivision).rounded(.up) * beatSnapDivision
+            var snapBeat = firstSnap
+            while snapBeat <= geometry.viewStartBeat + geometry.viewBeats {
+                let x = geometry.beatToX(snapBeat, width: size.width)
+                snapPath.move(to: CGPoint(x: x, y: 0))
+                snapPath.addLine(to: CGPoint(x: x, y: size.height))
+                snapBeat += beatSnapDivision
+            }
+            context.stroke(snapPath, with: .color(Color.cyan.opacity(0.06)), lineWidth: 0.25)
+        }
+    }
+
+    private func drawCurves(context: inout GraphicsContext, size: CGSize) {
+        let bps = breakpoints
+        guard bps.count >= 2 else { return }
+
+        // Walk the breakpoint list directly instead of sampling once per
+        // pixel. Linear segments become a single line; smooth segments are
+        // subdivided into a small fixed number of steps; step-hold segments
+        // draw a horizontal-then-vertical pair. This is roughly O(bps)
+        // instead of O(width) and produces cleaner geometry too.
+        var path = Path()
+        let startX = geometry.beatToX(bps[0].beat, width: size.width)
+        let startY = geometry.semitonesToY(bps[0].semitones, height: size.height)
+        path.move(to: CGPoint(x: startX, y: startY))
+
+        for i in 1..<bps.count {
+            let prev = bps[i - 1]
+            let bp = bps[i]
+            let x = geometry.beatToX(bp.beat, width: size.width)
+            let y = geometry.semitonesToY(bp.semitones, height: size.height)
+
+            switch prev.interpType {
+            case 2: // step
+                let prevY = geometry.semitonesToY(prev.semitones, height: size.height)
+                path.addLine(to: CGPoint(x: x, y: prevY))
+                path.addLine(to: CGPoint(x: x, y: y))
+            case 1: // smooth (smoothstep)
+                let segments = 16
+                let prevX = geometry.beatToX(prev.beat, width: size.width)
+                let prevY = geometry.semitonesToY(prev.semitones, height: size.height)
+                for s in 1...segments {
+                    let t = Double(s) / Double(segments)
+                    let sShaped = t * t * (3.0 - 2.0 * t)
+                    let xi = prevX + (x - prevX) * CGFloat(sShaped)
+                    let yi = prevY + (y - prevY) * CGFloat(sShaped)
+                    path.addLine(to: CGPoint(x: xi, y: yi))
+                }
+            default: // linear
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+
+        context.stroke(path, with: .color(Color.cyan.opacity(0.8)), lineWidth: 1.5)
+    }
+
+    private func drawBreakpoints(context: inout GraphicsContext, size: CGSize) {
+        for (i, bp) in breakpoints.enumerated() {
+            let x = geometry.beatToX(bp.beat, width: size.width)
+            let y = geometry.semitonesToY(bp.semitones, height: size.height)
+            let isSelected = selectedIndex == i
+
+            if isSelected {
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: x - 8, y: y - 8, width: 16, height: 16)),
+                    with: .color(.white),
+                    lineWidth: 1.5
+                )
+            }
+            context.fill(
+                Path(ellipseIn: CGRect(x: x - 6, y: y - 6, width: 12, height: 12)),
+                with: .color(Color.cyan.opacity(isSelected ? 0.5 : 0.3))
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)),
+                with: .color(Color.cyan)
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(x: x - 2, y: y - 2, width: 4, height: 4)),
+                with: .color(.white)
+            )
+        }
+    }
+
+    private func drawLoopRegion(context: inout GraphicsContext, size: CGSize) {
+        guard loopEnabled && loopBeats > 0 else { return }
+        let xEnd = geometry.beatToX(loopBeats, width: size.width)
+
+        if xEnd > 0 && xEnd < size.width {
+            context.stroke(
+                Path { p in
+                    p.move(to: CGPoint(x: xEnd, y: 0))
+                    p.addLine(to: CGPoint(x: xEnd, y: size.height))
+                },
+                with: .color(Color.green.opacity(0.5)),
+                style: StrokeStyle(lineWidth: 2, dash: [8, 4])
+            )
+
+            let text = Text("\(Int(loopBeats))").font(.system(size: 9, weight: .bold, design: .monospaced))
+            context.draw(text, at: CGPoint(x: xEnd - 12, y: 12))
+        }
+
+        if xEnd < size.width {
+            context.fill(
+                Path(CGRect(x: xEnd, y: 0, width: size.width - xEnd, height: size.height)),
+                with: .color(Color.black.opacity(0.3))
+            )
+        }
+    }
+}
+
+// MARK: - Automation Playhead Layer (extracted subview)
+//
+// The only piece that genuinely changes every frame. Split into its own
+// cheap Canvas so the heavy static layer stays cached.
+private struct AutomationPlayheadLayer: View, Equatable {
+    let playheadBeat: Double
+    let currentPitch: Double
+    let autoGlideEnabled: Bool
+    let autoGlideTarget: Double
+    let geometry: CurveGeometry
+
+    var body: some View {
+        Canvas(rendersAsynchronously: false) { context, size in
+            drawAutoGlideTarget(context: &context, size: size)
+            drawPlayhead(context: &context, size: size)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func drawPlayhead(context: inout GraphicsContext, size: CGSize) {
+        let beat = playheadBeat
+        if beat < geometry.viewStartBeat || beat > geometry.viewStartBeat + geometry.viewBeats { return }
+        let x = geometry.beatToX(beat, width: size.width)
+
+        context.stroke(
+            Path { p in
+                p.move(to: CGPoint(x: x, y: 0))
+                p.addLine(to: CGPoint(x: x, y: size.height))
+            },
+            with: .color(.white.opacity(0.6)),
+            lineWidth: 1.0
+        )
+
+        if abs(currentPitch) > 0.01 {
+            let pitchY = geometry.semitonesToY(currentPitch, height: size.height)
+            context.fill(
+                Path(ellipseIn: CGRect(x: x - 4, y: pitchY - 4, width: 8, height: 8)),
+                with: .color(.white)
+            )
+        }
+    }
+
+    private func drawAutoGlideTarget(context: inout GraphicsContext, size: CGSize) {
+        guard autoGlideEnabled else { return }
+        let y = geometry.semitonesToY(autoGlideTarget, height: size.height)
+
+        context.stroke(
+            Path { p in
+                p.move(to: CGPoint(x: 0, y: y))
+                p.addLine(to: CGPoint(x: size.width, y: y))
+            },
+            with: .color(Color.orange.opacity(0.5)),
+            style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])
+        )
+
+        let noteNum = Int(autoGlideTarget.rounded()) + 60
+        let pitchClass = ((noteNum % 12) + 12) % 12
+        let noteLabel = noteNames[pitchClass]
+        let octave = (noteNum / 12) - 1
+        let label = "\(noteLabel)\(octave)"
+        let text = Text(label).font(.system(size: 10, weight: .bold, design: .monospaced))
+        context.draw(text, at: CGPoint(x: size.width - 30, y: y - 10))
+    }
+}
+
 // MARK: - Automation State
 
 /// Bridges the C++ AutomationCurve to SwiftUI via Obj-C++ bridge methods.
 /// Includes undo/redo, beat snapping, and preset restore support.
 class AutomationState: ObservableObject {
-    struct UIBreakpoint: Identifiable {
+    struct UIBreakpoint: Identifiable, Equatable {
         let id = UUID()
         var beat: Double
         var semitones: Double
@@ -562,116 +981,67 @@ struct GlideMainView: View {
 
     // MARK: - Piano Roll Sidebar
     //
-    // Rendered into a single `Canvas` pass rather than a tree of SwiftUI
-    // `Rectangle`s with per-key gradients/shadows/animations. Under the
-    // 30 Hz display timer the old per-view approach re-laid-out ~24 heavy
-    // modifiers every frame; Canvas does it with a couple of fills.
+    // Thin wrapper around the extracted `PianoSidebarView` so the
+    // 30 Hz display timer can update playhead / levels without
+    // rebuilding the piano Canvas. `PianoSidebarView` is Equatable,
+    // so SwiftUI skips re-rendering it whenever the note mask hasn't
+    // changed.
 
     private var pianoRollSidebar: some View {
-        Canvas(opaque: true, rendersAsynchronously: false) { context, size in
-            drawPianoSidebar(context: &context, size: size)
-        }
-    }
-
-    private func drawPianoSidebar(context: inout GraphicsContext, size: CGSize) {
-        let noteCount = noteRangeHigh - noteRangeLow
-        guard noteCount > 0 else { return }
-
-        let semitoneHeight = size.height / CGFloat(noteCount)
-        let width = size.width
-        let maskLo = activeNoteMask.0
-        let maskHi = activeNoteMask.1
-
-        // Backdrop
-        context.fill(
-            Path(CGRect(origin: .zero, size: size)),
-            with: .color(Color(red: 0.03, green: 0.04, blue: 0.06))
+        PianoSidebarView(
+            maskLo: activeNoteMask.0,
+            maskHi: activeNoteMask.1,
+            noteRangeLow: noteRangeLow,
+            noteRangeHigh: noteRangeHigh
         )
-
-        // Flat palette — no gradients. The user asked for solid black
-        // black-keys and wants this as cheap as possible.
-        let whiteFill          = Color(white: 0.92)
-        let whiteActiveFill    = Color(red: 0.55, green: 0.88, blue: 1.00)
-        let blackFill          = Color.black
-        let blackActiveFill    = Color(red: 0.14, green: 0.42, blue: 0.60)
-        let dividerColor       = Color.black.opacity(0.30)
-        let labelColor         = Color(white: 0.22)
-
-        let cornerRadius: CGFloat = 3
-        let keyInsetY: CGFloat = 0.5 // gives us the dark divider between white keys
-        let blackKeyWidth = width * 0.58
-
-        // Pass 1: white keys
-        for i in 0..<noteCount {
-            let midi = noteRangeHigh - 1 - i
-            if PianoKey.isBlack(midi: midi) { continue }
-
-            let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
-            let y = CGFloat(i) * semitoneHeight + keyInsetY
-            let h = max(semitoneHeight - (keyInsetY * 2), 1)
-
-            let rect = CGRect(x: 0, y: y, width: width, height: h)
-            let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
-            context.fill(path, with: .color(active ? whiteActiveFill : whiteFill))
-
-            // C-note label
-            if midi % 12 == 0 {
-                let label = Text(PianoKey.octaveLabel(midi: midi))
-                    .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .foregroundColor(labelColor)
-                context.draw(label, at: CGPoint(x: width - 6, y: y + h / 2), anchor: .trailing)
-            }
-        }
-
-        // Divider line under each white key to visually separate adjacent
-        // whites (cheap single stroke).
-        let dividerPath = Path { p in
-            for i in 0..<noteCount {
-                let midi = noteRangeHigh - 1 - i
-                if PianoKey.isBlack(midi: midi) { continue }
-                let y = CGFloat(i + 1) * semitoneHeight
-                p.move(to: CGPoint(x: 0, y: y))
-                p.addLine(to: CGPoint(x: width, y: y))
-            }
-        }
-        context.stroke(dividerPath, with: .color(dividerColor), lineWidth: 0.5)
-
-        // Pass 2: black keys on top (shorter than white keys for a more
-        // realistic look — each black key occupies ~68% of the vertical
-        // space of a semitone row and is centred inside it).
-        let blackHeightFraction: CGFloat = 0.68
-        for i in 0..<noteCount {
-            let midi = noteRangeHigh - 1 - i
-            if !PianoKey.isBlack(midi: midi) { continue }
-
-            let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
-            let rowY = CGFloat(i) * semitoneHeight
-            let h = max(semitoneHeight * blackHeightFraction, 1)
-            let y = rowY + (semitoneHeight - h) / 2
-
-            let rect = CGRect(x: 0, y: y, width: blackKeyWidth, height: h)
-            let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
-            context.fill(path, with: .color(active ? blackActiveFill : blackFill))
-        }
+        .equatable()
     }
 
     // MARK: - Automation Canvas
+    //
+    // The automation canvas is split into three layers:
+    //   1. `AutomationStaticLayer`  — grid + curves + breakpoints +
+    //      loop region. Equatable; only redraws when breakpoints or
+    //      view range change.
+    //   2. `AutomationPlayheadLayer` — the only piece that moves on
+    //      every display-timer tick; cheap Canvas with 1-2 primitives.
+    //   3. Gesture layer (Color.clear) — hosts click/drag/pinch.
+    // SwiftUI's diffing short-circuits each layer independently, so
+    // the playhead updating at 24 Hz no longer re-runs the expensive
+    // grid/curve drawing every frame.
 
     private var automationCanvas: some View {
         GeometryReader { geo in
             let size = geo.size
             let noteCount = noteRangeHigh - noteRangeLow
             let pitchRange = Double(noteCount)
+            let geometry = CurveGeometry(
+                viewStartBeat: viewStartBeat,
+                viewBeats: viewBeats,
+                noteRangeLow: noteRangeLow,
+                noteRangeHigh: noteRangeHigh
+            )
 
             ZStack {
-                Canvas { context, canvasSize in
-                    drawGrid(context: context, size: canvasSize, noteCount: noteCount)
-                    drawCurves(context: context, size: canvasSize, pitchRange: pitchRange)
-                    drawBreakpoints(context: context, size: canvasSize, pitchRange: pitchRange)
-                    drawPlayhead(context: context, size: canvasSize, pitchRange: pitchRange)
-                    drawLoopRegion(context: context, size: canvasSize)
-                    drawAutoGlideTarget(context: context, size: canvasSize, pitchRange: pitchRange)
-                }
+                AutomationStaticLayer(
+                    breakpoints: automation.breakpoints,
+                    selectedIndex: automation.selectedIndex,
+                    snapEnabled: automation.snapEnabled,
+                    beatSnapDivision: automation.beatSnapDivision,
+                    loopEnabled: params.loopEnabled > 0.5,
+                    loopBeats: params.loopBeats,
+                    geometry: geometry
+                )
+                .equatable()
+
+                AutomationPlayheadLayer(
+                    playheadBeat: playheadBeat,
+                    currentPitch: currentPitch,
+                    autoGlideEnabled: params.autoGlide > 0.5,
+                    autoGlideTarget: autoGlideTarget,
+                    geometry: geometry
+                )
+                .equatable()
 
                 // Interaction layer: tap to select, drag to grab-and-bend the curve.
                 // Disabled in Auto mode (MIDI drives pitch, not breakpoints).
@@ -848,184 +1218,6 @@ struct GlideMainView: View {
         }
     }
 
-    // MARK: - Drawing Helpers
-
-    private func drawGrid(context: GraphicsContext, size: CGSize, noteCount: Int) {
-        let noteHeight = size.height / CGFloat(noteCount)
-
-        // Horizontal note lines
-        for i in 0...noteCount {
-            let y = CGFloat(i) * noteHeight
-            let midi = noteRangeHigh - i
-            let isC = midi % 12 == 0
-            context.stroke(
-                Path { p in p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y)) },
-                with: .color(.white.opacity(isC ? 0.15 : 0.05)),
-                lineWidth: isC ? 0.5 : 0.25
-            )
-        }
-
-        // Adaptive vertical beat grid
-        let tickInterval: Double
-        if viewBeats <= 8 { tickInterval = 0.25 }
-        else if viewBeats <= 16 { tickInterval = 0.5 }
-        else if viewBeats <= 32 { tickInterval = 1.0 }
-        else { tickInterval = 2.0 }
-
-        let firstTick = (viewStartBeat / tickInterval).rounded(.up) * tickInterval
-        var tick = firstTick
-        while tick <= viewStartBeat + viewBeats {
-            let x = beatToX(tick, width: size.width)
-            let isBar = tick.truncatingRemainder(dividingBy: 4) == 0
-            let isBeat = tick.truncatingRemainder(dividingBy: 1) == 0
-            context.stroke(
-                Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
-                with: .color(.white.opacity(isBar ? 0.2 : (isBeat ? 0.08 : 0.04))),
-                lineWidth: isBar ? 0.5 : 0.25
-            )
-            tick += tickInterval
-        }
-
-        // Beat snap grid overlay
-        if automation.snapEnabled && automation.beatSnapDivision > 0 && automation.beatSnapDivision < tickInterval {
-            let snap = automation.beatSnapDivision
-            let firstSnap = (viewStartBeat / snap).rounded(.up) * snap
-            var snapBeat = firstSnap
-            while snapBeat <= viewStartBeat + viewBeats {
-                let x = beatToX(snapBeat, width: size.width)
-                context.stroke(
-                    Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
-                    with: .color(Color.cyan.opacity(0.06)),
-                    lineWidth: 0.25
-                )
-                snapBeat += snap
-            }
-        }
-    }
-
-    private func drawCurves(context: GraphicsContext, size: CGSize, pitchRange: Double) {
-        let bps = automation.breakpoints
-        guard bps.count >= 2 else { return }
-
-        var path = Path()
-        let steps = Int(size.width)
-
-        for step in 0...steps {
-            let x = CGFloat(step)
-            let beat = xToBeat(x, width: size.width)
-            let semi = evaluateCurve(at: beat)
-            let y = semitonesToY(semi, height: size.height, range: pitchRange)
-
-            if step == 0 { path.move(to: CGPoint(x: x, y: y)) }
-            else { path.addLine(to: CGPoint(x: x, y: y)) }
-        }
-
-        context.stroke(path, with: .color(Color.cyan.opacity(0.8)), lineWidth: 1.5)
-    }
-
-    private func drawBreakpoints(context: GraphicsContext, size: CGSize, pitchRange: Double) {
-        for (i, bp) in automation.breakpoints.enumerated() {
-            let x = beatToX(bp.beat, width: size.width)
-            let y = semitonesToY(bp.semitones, height: size.height, range: pitchRange)
-            let isSelected = automation.selectedIndex == i
-
-            // Selection ring
-            if isSelected {
-                context.stroke(
-                    Path(ellipseIn: CGRect(x: x - 8, y: y - 8, width: 16, height: 16)),
-                    with: .color(.white),
-                    lineWidth: 1.5
-                )
-            }
-
-            context.fill(
-                Path(ellipseIn: CGRect(x: x - 6, y: y - 6, width: 12, height: 12)),
-                with: .color(Color.cyan.opacity(isSelected ? 0.5 : 0.3))
-            )
-            context.fill(
-                Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)),
-                with: .color(Color.cyan)
-            )
-            context.fill(
-                Path(ellipseIn: CGRect(x: x - 2, y: y - 2, width: 4, height: 4)),
-                with: .color(.white)
-            )
-        }
-    }
-
-    private func drawPlayhead(context: GraphicsContext, size: CGSize, pitchRange: Double) {
-        let beat = playheadBeat
-        if beat < viewStartBeat || beat > viewStartBeat + viewBeats { return }
-
-        let x = beatToX(beat, width: size.width)
-
-        // Playhead line
-        context.stroke(
-            Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
-            with: .color(.white.opacity(0.6)),
-            lineWidth: 1.0
-        )
-
-        // Pitch dot on the curve at playhead position
-        if abs(currentPitch) > 0.01 {
-            let pitchY = semitonesToY(currentPitch, height: size.height, range: pitchRange)
-            context.fill(
-                Path(ellipseIn: CGRect(x: x - 4, y: pitchY - 4, width: 8, height: 8)),
-                with: .color(.white)
-            )
-        }
-    }
-
-    private func drawLoopRegion(context: GraphicsContext, size: CGSize) {
-        guard params.loopEnabled > 0.5 && params.loopBeats > 0 else { return }
-
-        let loopEnd = params.loopBeats
-        let xEnd = beatToX(loopEnd, width: size.width)
-        let xStart = beatToX(0.0, width: size.width)
-
-        // Draw loop region boundary line
-        if xEnd > 0 && xEnd < size.width {
-            context.stroke(
-                Path { p in p.move(to: CGPoint(x: xEnd, y: 0)); p.addLine(to: CGPoint(x: xEnd, y: size.height)) },
-                with: .color(Color.green.opacity(0.5)),
-                style: StrokeStyle(lineWidth: 2, dash: [8, 4])
-            )
-
-            // "LOOP" label at the boundary
-            let text = Text("\(Int(loopEnd))").font(.system(size: 9, weight: .bold, design: .monospaced))
-            context.draw(text, at: CGPoint(x: xEnd - 12, y: 12))
-        }
-
-        // Dim the area outside the loop region
-        if xEnd < size.width {
-            context.fill(
-                Path(CGRect(x: xEnd, y: 0, width: size.width - xEnd, height: size.height)),
-                with: .color(Color.black.opacity(0.3))
-            )
-        }
-    }
-
-    private func drawAutoGlideTarget(context: GraphicsContext, size: CGSize, pitchRange: Double) {
-        guard params.autoGlide > 0.5 else { return }
-
-        let y = semitonesToY(autoGlideTarget, height: size.height, range: pitchRange)
-
-        // Horizontal target line across the canvas
-        context.stroke(
-            Path { p in p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y)) },
-            with: .color(Color.orange.opacity(0.5)),
-            style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])
-        )
-
-        // Target note label
-        let noteNum = Int(autoGlideTarget.rounded()) + 60  // relative to C4
-        let noteName = noteNames[((noteNum % 12) + 12) % 12]
-        let octave = (noteNum / 12) - 1
-        let label = "\(noteName)\(octave)"
-        let text = Text(label).font(.system(size: 10, weight: .bold, design: .monospaced))
-        context.draw(text, at: CGPoint(x: size.width - 30, y: y - 10))
-    }
-
     // MARK: - Coordinate Conversion
 
     private func beatToX(_ beat: Double, width: CGFloat) -> CGFloat {
@@ -1048,36 +1240,6 @@ struct GlideMainView: View {
         let noteInRange = Double(noteRangeHigh) - normalized * range
         let midNote = Double(noteRangeLow + noteRangeHigh) / 2.0
         return noteInRange - midNote
-    }
-
-    // MARK: - Curve Evaluation (mirrors C++ for display)
-
-    private func evaluateCurve(at beat: Double) -> Double {
-        let bps = automation.breakpoints
-        guard !bps.isEmpty else { return 0 }
-        if bps.count == 1 { return bps[0].semitones }
-        if beat <= bps[0].beat { return bps[0].semitones }
-        if beat >= bps[bps.count - 1].beat { return bps[bps.count - 1].semitones }
-
-        var lo = 0, hi = bps.count - 1
-        while lo < hi - 1 {
-            let mid = (lo + hi) / 2
-            if bps[mid].beat <= beat { lo = mid } else { hi = mid }
-        }
-
-        let a = bps[lo], b = bps[hi]
-        let span = b.beat - a.beat
-        guard span > 1e-9 else { return a.semitones }
-        let t = (beat - a.beat) / span
-
-        switch a.interpType {
-        case 2: return a.semitones
-        case 1:
-            let s = t * t * (3.0 - 2.0 * t)
-            return a.semitones + (b.semitones - a.semitones) * s
-        default:
-            return a.semitones + (b.semitones - a.semitones) * t
-        }
     }
 
     // MARK: - Hit Testing
@@ -1109,16 +1271,30 @@ struct GlideMainView: View {
     }
 
     private func startDisplayTimer() {
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
-            activeNoteMask = (
-                audioUnit.kernel.activeNoteBitmaskLo(),
-                audioUnit.kernel.activeNoteBitmaskHi()
-            )
-            playheadBeat = audioUnit.kernel.currentBeatPosition()
-            currentPitch = audioUnit.kernel.currentPitchSemitones()
-            inputLevel = (audioUnit.kernel.inputLevelL(), audioUnit.kernel.inputLevelR())
-            outputLevel = (audioUnit.kernel.outputLevelL(), audioUnit.kernel.outputLevelR())
-            autoGlideTarget = audioUnit.kernel.autoGlideTarget()
+        // 24 Hz is smooth enough for a meter/playhead and cuts the wake
+        // load vs. the previous 30 Hz. Each state write is gated by an
+        // equality check so SwiftUI only invalidates the relevant
+        // subviews when the values actually changed.
+        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 24.0, repeats: true) { _ in
+            let kernel = audioUnit.kernel
+
+            let newMask = (kernel.activeNoteBitmaskLo(), kernel.activeNoteBitmaskHi())
+            if newMask != activeNoteMask { activeNoteMask = newMask }
+
+            let newBeat = kernel.currentBeatPosition()
+            if newBeat != playheadBeat { playheadBeat = newBeat }
+
+            let newPitch = kernel.currentPitchSemitones()
+            if newPitch != currentPitch { currentPitch = newPitch }
+
+            let newIn = (kernel.inputLevelL(), kernel.inputLevelR())
+            if newIn != inputLevel { inputLevel = newIn }
+
+            let newOut = (kernel.outputLevelL(), kernel.outputLevelR())
+            if newOut != outputLevel { outputLevel = newOut }
+
+            let newTarget = kernel.autoGlideTarget()
+            if newTarget != autoGlideTarget { autoGlideTarget = newTarget }
         }
     }
 }
