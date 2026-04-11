@@ -21,4 +21,10 @@ public class AudioUnitFactory: NSObject, AUAudioUnitFactory {
         hostingController.sizingOptions = .preferredContentSize
         completionHandler(hostingController)
     }
+
+    public func beginRequest(with context: NSExtensionContext) {
+        // Required by NSExtensionRequestHandling. AUAudioUnitFactory
+        // handles the actual Audio Unit extension lifecycle, so no
+        // additional work is needed here.
+    }
 }
