@@ -22,7 +22,7 @@ melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
 - Custom in-place radix-2 FFT (no Accelerate dependency — tests compile standalone)
 - **MIDI-driven auto-glide** (last-note priority, highest-note fallback)
 - Input/output peak level tracking (atomic, once per block)
-- 407 test assertions passing
+- 412 test assertions passing
 
 **Plugin**
 - AUv3 music effect (`aumf`) — receives both MIDI and audio
@@ -127,7 +127,7 @@ c++ -std=c++17 -O2 -I MyGlideAU/DSP Tests/test_glide_dsp.cpp -o Tests/test_glide
 ./Tests/test_glide
 ```
 
-407 test assertions covering: AutomationCurve (breakpoints, interpolation,
+412 test assertions covering: AutomationCurve (breakpoints, interpolation,
 triple-buffer, serialization, edge cases), GranularPitchShifter (frequency
 accuracy via Goertzel, extreme values, tiny buffers), PhaseVocoderPitchShifter
 (FFT roundtrip, octave shift, mode switching, latency reporting),
