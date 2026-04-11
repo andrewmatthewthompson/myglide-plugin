@@ -189,7 +189,7 @@ class AutomationState: ObservableObject {
         breakpoints.removeAll()
         for i in 0..<count {
             var beat: Double = 0, semi: Double = 0, interp: UInt8 = 0
-            bridge.automationBreakpoint(atIndex: Int32(i), beat: &beat, semitones: &semi, interpType: &interp)
+            bridge.automationBreakpoint(at: Int32(i), beat: &beat, semitones: &semi, interpType: &interp)
             breakpoints.append(UIBreakpoint(beat: beat, semitones: semi, interpType: Int(interp)))
         }
         undoStack.removeAll()
@@ -586,9 +586,9 @@ struct GlideMainView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(
-                        MagnifyGesture()
+                        MagnificationGesture()
                             .onChanged { value in
-                                let newBeats = baseViewBeats / value.magnification
+                                let newBeats = baseViewBeats / Double(value)
                                 viewBeats = max(4.0, min(64.0, newBeats))
                             }
                             .onEnded { _ in
