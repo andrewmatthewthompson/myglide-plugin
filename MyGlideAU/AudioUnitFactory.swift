@@ -1,5 +1,6 @@
 import CoreAudioKit
 import AVFoundation
+import SwiftUI
 
 public class AudioUnitFactory: NSObject, AUAudioUnitFactory {
 
