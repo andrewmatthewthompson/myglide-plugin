@@ -21,8 +21,9 @@ melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
 - ±48 semitone range, denormal guarding, RT-safe
 - Custom in-place radix-2 FFT (no Accelerate dependency — tests compile standalone)
 - **MIDI-driven auto-glide** (last-note priority, highest-note fallback)
+- **Curve looping** — repeat automation pattern over 4/8/16/32 beats
 - Input/output peak level tracking (atomic, once per block)
-- 412 test assertions passing
+- 418 test assertions passing
 
 **Plugin**
 - AUv3 music effect (`aumf`) — receives both MIDI and audio
@@ -59,6 +60,8 @@ melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
 | 3    | Pitch Offset  | -24–+24  | semi    | 0       | DAW-automatable offset |
 | 4    | Shifter Mode  | 0–1      | indexed | 0       | 0=Granular, 1=Vocoder |
 | 5    | Auto Glide    | 0–1      | bool    | 0       | 0=Manual, 1=Auto (MIDI-driven) |
+| 6    | Loop          | 0–1      | bool    | 0       | Loop automation curve |
+| 7    | Loop Length   | 4–64     | beats   | 16      | Loop region in beats |
 
 ## Project Layout
 
@@ -68,7 +71,7 @@ MyGlideAU/                  AUv3 app extension
   AudioUnitFactory.swift    Principal class for extension
   GlideAudioUnit.swift      AUAudioUnit subclass + render loop + presets
   Parameters/
-    GlideParameters.swift   AUParameterTree definitions (6 params)
+    GlideParameters.swift   AUParameterTree definitions (8 params)
   UI/
     GlideMainView.swift     Piano roll + automation editor + controls
   DSP/
@@ -128,7 +131,7 @@ c++ -std=c++17 -O2 -I MyGlideAU/DSP Tests/test_glide_dsp.cpp -o Tests/test_glide
 ./Tests/test_glide
 ```
 
-412 test assertions covering: AutomationCurve (breakpoints, interpolation,
+418 test assertions covering: AutomationCurve (breakpoints, interpolation,
 triple-buffer, serialization, edge cases), GranularPitchShifter (frequency
 accuracy via Goertzel, extreme values, tiny buffers), PhaseVocoderPitchShifter
 (FFT roundtrip, octave shift, mode switching, latency reporting),

@@ -220,6 +220,8 @@ class GlideParameterState: ObservableObject {
     @Published var pitchOffset: Double = 0.0
     @Published var shifterMode: Double = 0.0   // 0=Granular, 1=Vocoder
     @Published var autoGlide: Double = 0.0     // 0=Manual, 1=Auto
+    @Published var loopEnabled: Double = 0.0   // 0=off, 1=on
+    @Published var loopBeats: Double = 16.0    // loop length in beats
 
     private var parameterTree: AUParameterTree?
     private var observerToken: AUParameterObserverToken?
@@ -249,6 +251,8 @@ class GlideParameterState: ObservableObject {
         case 3: pitchOffset = value
         case 4: shifterMode = value
         case 5: autoGlide = value
+        case 6: loopEnabled = value
+        case 7: loopBeats = value
         default: break
         }
         isExternalUpdate = false
@@ -392,6 +396,32 @@ struct GlideMainView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 120)
+
+            // Loop toggle + length
+            Toggle(isOn: Binding(
+                get: { params.loopEnabled > 0.5 },
+                set: { params.sendIfLocal(6, value: $0 ? 1.0 : 0.0) }
+            )) {
+                Image(systemName: "repeat")
+                    .font(.system(size: 11))
+            }
+            .toggleStyle(.button)
+            .foregroundColor(params.loopEnabled > 0.5 ? .green : .white.opacity(0.4))
+            .help("Loop automation curve")
+
+            if params.loopEnabled > 0.5 {
+                Picker("", selection: Binding(
+                    get: { Int(params.loopBeats) },
+                    set: { params.sendIfLocal(7, value: Double($0)) }
+                )) {
+                    Text("4").tag(4)
+                    Text("8").tag(8)
+                    Text("16").tag(16)
+                    Text("32").tag(32)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 100)
+            }
 
             Divider().frame(height: 20).background(Color.white.opacity(0.3))
 
@@ -541,6 +571,7 @@ struct GlideMainView: View {
                     drawCurves(context: context, size: canvasSize, pitchRange: pitchRange)
                     drawBreakpoints(context: context, size: canvasSize, pitchRange: pitchRange)
                     drawPlayhead(context: context, size: canvasSize, pitchRange: pitchRange)
+                    drawLoopRegion(context: context, size: canvasSize)
                     drawAutoGlideTarget(context: context, size: canvasSize, pitchRange: pitchRange)
                 }
 
@@ -802,6 +833,35 @@ struct GlideMainView: View {
             context.fill(
                 Path(ellipseIn: CGRect(x: x - 4, y: pitchY - 4, width: 8, height: 8)),
                 with: .color(.white)
+            )
+        }
+    }
+
+    private func drawLoopRegion(context: GraphicsContext, size: CGSize) {
+        guard params.loopEnabled > 0.5 && params.loopBeats > 0 else { return }
+
+        let loopEnd = params.loopBeats
+        let xEnd = beatToX(loopEnd, width: size.width)
+        let xStart = beatToX(0.0, width: size.width)
+
+        // Draw loop region boundary line
+        if xEnd > 0 && xEnd < size.width {
+            context.stroke(
+                Path { p in p.move(to: CGPoint(x: xEnd, y: 0)); p.addLine(to: CGPoint(x: xEnd, y: size.height)) },
+                with: .color(Color.green.opacity(0.5)),
+                style: StrokeStyle(lineWidth: 2, dash: [8, 4])
+            )
+
+            // "LOOP" label at the boundary
+            let text = Text("\(Int(loopEnd))").font(.system(size: 9, weight: .bold, design: .monospaced))
+            context.draw(text, at: CGPoint(x: xEnd - 12, y: 12))
+        }
+
+        // Dim the area outside the loop region
+        if xEnd < size.width {
+            context.fill(
+                Path(CGRect(x: xEnd, y: 0, width: size.width - xEnd, height: size.height)),
+                with: .color(Color.black.opacity(0.3))
             )
         }
     }

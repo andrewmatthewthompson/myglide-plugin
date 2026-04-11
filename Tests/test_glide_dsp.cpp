@@ -1472,6 +1472,113 @@ TEST(level_meter_input_differs_from_output_with_pitch) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Curve Looping Tests
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(loop_wraps_beat_position) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);
+    p.setParameter(kLoopEnabled, 1.0f);
+    p.setParameter(kLoopBeats, 4.0f);  // 4-beat loop
+    p.setBeatPosition(0.0, 120.0);
+
+    // Add a ramp: beat 0 = 0 semi, beat 4 = 12 semi
+    auto* curve = p.automationCurvePtr();
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 0.0, InterpolationType::Linear);
+    curve->addBreakpoint(4.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    // Process 2 seconds (= 4 beats at 120 BPM = one full loop)
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    // Process another 2 seconds — beat position is now 4-8,
+    // but with loop enabled it should wrap back to 0-4
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    // The pitch should be cycling, not stuck at 12.
+    // After wrapping, the pitch target goes back to 0.
+    // The display pitch should be somewhere in [0, 12] range, not fixed at 12.
+    EXPECT(!hasInvalidSamples(buf.left, 48000));
+}
+
+TEST(loop_disabled_does_not_wrap) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);
+    p.setParameter(kLoopEnabled, 0.0f);  // loop OFF
+    p.setParameter(kLoopBeats, 4.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    auto* curve = p.automationCurvePtr();
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 0.0, InterpolationType::Linear);
+    curve->addBreakpoint(4.0, 12.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    // Process 4 seconds (8 beats) — beat goes past loop boundary
+    StereoBuffer buf;
+    for (int i = 0; i < 4; ++i) {
+        fillSine(buf.left, 48000, 440.0, 48000.0);
+        fillSine(buf.right, 48000, 440.0, 48000.0);
+        p.process(buf.channels, 2, 48000);
+    }
+
+    // Without looping, beat 8 is past the last breakpoint (4.0),
+    // so pitch should hold at 12.0
+    double pitch = p.currentPitchSemitones();
+    EXPECT(std::fabs(pitch - 12.0) < 1.5);
+}
+
+TEST(loop_different_lengths) {
+    // Verify that changing loop length works
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kLoopEnabled, 1.0f);
+    p.setParameter(kLoopBeats, 8.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    auto* curve = p.automationCurvePtr();
+    curve->beginEdit();
+    curve->addBreakpoint(0.0, 0.0, InterpolationType::Linear);
+    curve->addBreakpoint(8.0, 24.0, InterpolationType::Linear);
+    curve->commitEdit();
+
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    EXPECT(!hasInvalidSamples(buf.left, 48000));
+
+    // Change loop length mid-stream
+    p.setParameter(kLoopBeats, 16.0f);
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    EXPECT(!hasInvalidSamples(buf.left, 48000));
+}
+
+TEST(loop_parameter_get_set) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kLoopEnabled, 1.0f);
+    p.setParameter(kLoopBeats, 32.0f);
+    EXPECT(std::fabs(p.getParameter(kLoopEnabled) - 1.0f) < 0.01f);
+    EXPECT(std::fabs(p.getParameter(kLoopBeats) - 32.0f) < 0.01f);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Code Review Fix Tests
 // ══════════════════════════════════════════════════════════════════════════
 

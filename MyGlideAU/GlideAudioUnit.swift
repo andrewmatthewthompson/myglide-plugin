@@ -93,6 +93,8 @@ public class GlideAudioUnit: AUAudioUnit {
             case 3: return String(format: "%+.1f st", value)
             case 4: return value < 0.5 ? "Granular" : "Vocoder"
             case 5: return value > 0.5 ? "Auto" : "Manual"
+            case 6: return value > 0.5 ? "Loop On" : "Loop Off"
+            case 7: return String(format: "%.0f beats", value)
             default: return String(format: "%.1f", value)
             }
         }

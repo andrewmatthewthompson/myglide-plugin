@@ -16,6 +16,8 @@ enum ParamAddress : uint64_t {
     kPitchOffset  = 3,   // DAW-automatable pitch offset (semitones, ±24)
     kShifterMode  = 4,   // 0=Granular, 1=Vocoder
     kAutoGlide    = 5,   // 0=Manual (automation curve), 1=Auto (MIDI-driven)
+    kLoopEnabled  = 6,   // 0=off, 1=on
+    kLoopBeats    = 7,   // Loop length in beats (4, 8, 16, 32)
 };
 
 /// MIDI pitch automation processor.
@@ -119,6 +121,8 @@ public:
             case kPitchOffset:  mSmPitchOffset.setTarget(value);  break;
             case kShifterMode:  mShifterMode = static_cast<int>(value); break;
             case kAutoGlide:    mAutoGlide = static_cast<int>(value);  break;
+            case kLoopEnabled:  mLoopEnabled = static_cast<int>(value); break;
+            case kLoopBeats:    mLoopBeats = static_cast<double>(value); break;
         }
     }
 
@@ -130,6 +134,8 @@ public:
             case kPitchOffset:  return static_cast<float>(mSmPitchOffset.current());
             case kShifterMode:  return static_cast<float>(mShifterMode);
             case kAutoGlide:    return static_cast<float>(mAutoGlide);
+            case kLoopEnabled:  return static_cast<float>(mLoopEnabled);
+            case kLoopBeats:    return static_cast<float>(mLoopBeats);
         }
         return 0.0f;
     }
@@ -235,7 +241,13 @@ public:
             if (mAutoGlide) {
                 targetSemitones = mAutoGlideTarget.load(std::memory_order_relaxed) + pitchOffset;
             } else {
-                targetSemitones = mAutomation.evaluate(beatPos) + pitchOffset;
+                // Loop: wrap beat position to repeat the curve pattern
+                double evalBeat = beatPos;
+                if (mLoopEnabled && mLoopBeats > 0.0) {
+                    evalBeat = std::fmod(beatPos, mLoopBeats);
+                    if (evalBeat < 0.0) evalBeat += mLoopBeats;
+                }
+                targetSemitones = mAutomation.evaluate(evalBeat) + pitchOffset;
             }
             mSmPitch.setTarget(targetSemitones);
             double smoothedSemitones = mSmPitch.next();
@@ -329,6 +341,8 @@ private:
     int     mPitchRange   = 24;
     int     mShifterMode  = 0;  // 0=Granular, 1=Vocoder
     int     mAutoGlide    = 0;  // 0=Manual (curve), 1=Auto (MIDI-driven)
+    int     mLoopEnabled  = 0;  // 0=off, 1=on
+    double  mLoopBeats    = 16.0;  // loop length in beats
 
     // Auto-glide state
     static constexpr uint8_t kReferenceNote = 60;  // C4 = 0 semitones

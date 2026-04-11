@@ -10,6 +10,8 @@ enum GlideParameters {
         case pitchOffset = 3   // DAW-automatable pitch offset (semitones)
         case shifterMode = 4   // 0=Granular, 1=Vocoder
         case autoGlide   = 5   // 0=Manual, 1=Auto (MIDI-driven)
+        case loopEnabled = 6   // 0=off, 1=on
+        case loopBeats   = 7   // Loop length in beats
     }
 
     static func createParameters() -> [AUParameter] {
@@ -81,6 +83,30 @@ enum GlideParameters {
                 min: 0,
                 max: 1,
                 unit: .boolean,
+                unitName: nil,
+                flags: [.flag_IsReadable, .flag_IsWritable],
+                valueStrings: nil,
+                dependentParameters: nil
+            ),
+            AUParameterTree.createParameter(
+                withIdentifier: "loopEnabled",
+                name: "Loop",
+                address: Address.loopEnabled.rawValue,
+                min: 0,
+                max: 1,
+                unit: .boolean,
+                unitName: nil,
+                flags: [.flag_IsReadable, .flag_IsWritable],
+                valueStrings: nil,
+                dependentParameters: nil
+            ),
+            AUParameterTree.createParameter(
+                withIdentifier: "loopBeats",
+                name: "Loop Length",
+                address: Address.loopBeats.rawValue,
+                min: 4,
+                max: 64,
+                unit: .beats,
                 unitName: nil,
                 flags: [.flag_IsReadable, .flag_IsWritable],
                 valueStrings: nil,
