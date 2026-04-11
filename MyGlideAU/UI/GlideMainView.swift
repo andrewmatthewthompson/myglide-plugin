@@ -193,6 +193,7 @@ class GlideParameterState: ObservableObject {
     @Published var pitchRange: Double = 24.0
     @Published var pitchOffset: Double = 0.0
     @Published var shifterMode: Double = 0.0   // 0=Granular, 1=Vocoder
+    @Published var autoGlide: Double = 0.0     // 0=Manual, 1=Auto
 
     private var parameterTree: AUParameterTree?
     private var observerToken: AUParameterObserverToken?
@@ -221,6 +222,7 @@ class GlideParameterState: ObservableObject {
         case 2: pitchRange = value
         case 3: pitchOffset = value
         case 4: shifterMode = value
+        case 5: autoGlide = value
         default: break
         }
         isExternalUpdate = false
@@ -245,6 +247,7 @@ struct GlideMainView: View {
     @State private var currentPitch: Double = 0.0
     @State private var inputLevel: (Double, Double) = (0, 0)
     @State private var outputLevel: (Double, Double) = (0, 0)
+    @State private var autoGlideTarget: Double = 0.0
     @State private var displayTimer: Timer?
 
     // View range (zoom/scroll)
@@ -352,6 +355,17 @@ struct GlideMainView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 140)
+
+            // Auto-glide mode (Manual / Auto)
+            Picker("", selection: Binding(
+                get: { Int(params.autoGlide) },
+                set: { params.sendIfLocal(5, value: Double($0)) }
+            )) {
+                Text("Manual").tag(0)
+                Text("Auto").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 120)
 
             Divider().frame(height: 20).background(Color.white.opacity(0.3))
 
@@ -501,11 +515,14 @@ struct GlideMainView: View {
                     drawCurves(context: context, size: canvasSize, pitchRange: pitchRange)
                     drawBreakpoints(context: context, size: canvasSize, pitchRange: pitchRange)
                     drawPlayhead(context: context, size: canvasSize, pitchRange: pitchRange)
+                    drawAutoGlideTarget(context: context, size: canvasSize, pitchRange: pitchRange)
                 }
 
                 // Interaction layer: click to add/select, drag to move or draw
+                // Disabled in Auto mode (MIDI drives pitch, not breakpoints)
                 Color.clear
                     .contentShape(Rectangle())
+                    .allowsHitTesting(params.autoGlide < 0.5)
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onEnded { value in
@@ -752,6 +769,27 @@ struct GlideMainView: View {
         }
     }
 
+    private func drawAutoGlideTarget(context: GraphicsContext, size: CGSize, pitchRange: Double) {
+        guard params.autoGlide > 0.5 else { return }
+
+        let y = semitonesToY(autoGlideTarget, height: size.height, range: pitchRange)
+
+        // Horizontal target line across the canvas
+        context.stroke(
+            Path { p in p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y)) },
+            with: .color(Color.orange.opacity(0.5)),
+            style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])
+        )
+
+        // Target note label
+        let noteNum = Int(autoGlideTarget.rounded()) + 60  // relative to C4
+        let noteName = noteNames[((noteNum % 12) + 12) % 12]
+        let octave = (noteNum / 12) - 1
+        let label = "\(noteName)\(octave)"
+        let text = Text(label).font(.system(size: 10, weight: .bold, design: .monospaced))
+        context.draw(text, at: CGPoint(x: size.width - 30, y: y - 10))
+    }
+
     // MARK: - Coordinate Conversion
 
     private func beatToX(_ beat: Double, width: CGFloat) -> CGFloat {
@@ -844,6 +882,7 @@ struct GlideMainView: View {
             currentPitch = audioUnit.kernel.currentPitchSemitones()
             inputLevel = (audioUnit.kernel.inputLevelL(), audioUnit.kernel.inputLevelR())
             outputLevel = (audioUnit.kernel.outputLevelL(), audioUnit.kernel.outputLevelR())
+            autoGlideTarget = audioUnit.kernel.autoGlideTarget()
         }
     }
 }

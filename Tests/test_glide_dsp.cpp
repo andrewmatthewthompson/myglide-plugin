@@ -1472,6 +1472,159 @@ TEST(level_meter_input_differs_from_output_with_pitch) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Auto-Glide Tests
+// ══════════════════════════════════════════════════════════════════════════
+
+TEST(autoglide_note_on_sets_pitch_target) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kAutoGlide, 1.0f);
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);  // fast glide
+    p.setBeatPosition(0.0, 120.0);
+
+    // Play E4 (MIDI 64) — should target +4 semitones from C4 (60)
+    p.handleMIDIEvent(0x90, 64, 100);
+
+    EXPECT(std::fabs(p.autoGlideTarget() - 4.0) < 0.01);
+
+    // Process to let smoother converge
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    // Display pitch should be near +4 semitones
+    double pitch = p.currentPitchSemitones();
+    EXPECT(std::fabs(pitch - 4.0) < 1.0);
+}
+
+TEST(autoglide_note_off_falls_back_to_held_note) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kAutoGlide, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Hold C4 (60) then E4 (64)
+    p.handleMIDIEvent(0x90, 60, 100);  // C4
+    p.handleMIDIEvent(0x90, 64, 100);  // E4 — becomes active (last note)
+    EXPECT(std::fabs(p.autoGlideTarget() - 4.0) < 0.01);  // E4 = +4
+
+    // Release E4 — should fall back to C4 (highest remaining)
+    p.handleMIDIEvent(0x80, 64, 0);
+    EXPECT(std::fabs(p.autoGlideTarget() - 0.0) < 0.01);  // C4 = 0
+}
+
+TEST(autoglide_all_notes_off_holds_last_pitch) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kAutoGlide, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Play and release G4 (67 = +7 semitones)
+    p.handleMIDIEvent(0x90, 67, 100);
+    EXPECT(std::fabs(p.autoGlideTarget() - 7.0) < 0.01);
+
+    p.handleMIDIEvent(0x80, 67, 0);
+    // Target should HOLD at +7 (not reset to 0)
+    EXPECT(std::fabs(p.autoGlideTarget() - 7.0) < 0.01);
+}
+
+TEST(autoglide_manual_mode_ignores_midi_for_pitch) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kAutoGlide, 0.0f);  // Manual mode
+    p.setParameter(kMix, 100.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Play a note — should NOT affect pitch target (manual uses automation curve)
+    p.handleMIDIEvent(0x90, 72, 100);  // C5
+
+    // Process with no automation breakpoints — pitch should stay at 0
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    double pitch = p.currentPitchSemitones();
+    EXPECT(std::fabs(pitch) < 1.0);  // should be near 0 (no automation)
+}
+
+TEST(autoglide_mode_switch_no_crash) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kMix, 100.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    StereoBuffer buf;
+
+    // Start manual, process
+    p.setParameter(kAutoGlide, 0.0f);
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    // Switch to auto, play note, process
+    p.setParameter(kAutoGlide, 1.0f);
+    p.handleMIDIEvent(0x90, 67, 100);
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    // Switch back to manual
+    p.setParameter(kAutoGlide, 0.0f);
+    fillSine(buf.left, 4800, 440.0, 48000.0);
+    fillSine(buf.right, 4800, 440.0, 48000.0);
+    p.process(buf.channels, 2, 4800);
+
+    EXPECT(!hasInvalidSamples(buf.left, 4800));
+}
+
+TEST(autoglide_with_pitch_offset) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kAutoGlide, 1.0f);
+    p.setParameter(kPitchOffset, 5.0f);  // +5 semitones offset
+    p.setParameter(kMix, 100.0f);
+    p.setParameter(kGlideTime, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Play C4 (0 semitones) + 5 offset = 5 semitones total
+    p.handleMIDIEvent(0x90, 60, 100);
+
+    StereoBuffer buf;
+    fillSine(buf.left, 48000, 440.0, 48000.0);
+    fillSine(buf.right, 48000, 440.0, 48000.0);
+    p.process(buf.channels, 2, 48000);
+
+    // Pitch should converge to ~5 (auto target 0 + offset 5)
+    double pitch = p.currentPitchSemitones();
+    EXPECT(std::fabs(pitch - 5.0) < 1.5);
+}
+
+TEST(autoglide_highest_note_priority) {
+    GlideProcessor p;
+    p.setUp(2, 48000.0);
+    p.setParameter(kAutoGlide, 1.0f);
+    p.setBeatPosition(0.0, 120.0);
+
+    // Play C4, E4, G4 (chord)
+    p.handleMIDIEvent(0x90, 60, 100);  // C4
+    p.handleMIDIEvent(0x90, 64, 100);  // E4
+    p.handleMIDIEvent(0x90, 67, 100);  // G4 — last note, target = +7
+
+    EXPECT(std::fabs(p.autoGlideTarget() - 7.0) < 0.01);
+
+    // Release G4 — should fall back to E4 (highest remaining)
+    p.handleMIDIEvent(0x80, 67, 0);
+    EXPECT(std::fabs(p.autoGlideTarget() - 4.0) < 0.01);
+
+    // Release E4 — should fall back to C4
+    p.handleMIDIEvent(0x80, 64, 0);
+    EXPECT(std::fabs(p.autoGlideTarget() - 0.0) < 0.01);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Performance Regression Tests
 //
 // These tests enforce minimum performance floors. If a code change causes

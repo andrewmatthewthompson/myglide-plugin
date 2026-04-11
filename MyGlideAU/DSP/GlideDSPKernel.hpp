@@ -86,6 +86,7 @@ public:
     double inputLevelR() const { return mProcessor.inputLevelR(); }
     double outputLevelL() const { return mProcessor.outputLevelL(); }
     double outputLevelR() const { return mProcessor.outputLevelR(); }
+    double autoGlideTarget() const { return mProcessor.autoGlideTarget(); }
 
     // ── Serialization (for preset save/load) ─────────────────────────────
 

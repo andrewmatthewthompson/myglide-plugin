@@ -2,11 +2,11 @@
 
 AUv3 MIDI pitch automation / glide plugin for Logic Pro (macOS 13+).
 
-Draw pitch automation curves with snap-to-note breakpoints, and the plugin
-applies real-time pitch shifting to audio. Choose between a granular shifter
-(low latency, good for effects) or a phase vocoder (higher quality, better
-for vocals). Designed for melodic pitch glides — synth leads sliding between
-notes, DJ risers, vocal effects, etc.
+Two modes: **Manual** — draw pitch automation curves with snap-to-note
+breakpoints. **Auto** — MIDI notes directly drive the pitch with smooth
+portamento glides. Choose between a granular shifter (low latency, good for
+effects) or a phase vocoder (higher quality, better for vocals). Designed for
+melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
 
 ## Features
 
@@ -20,8 +20,9 @@ notes, DJ risers, vocal effects, etc.
 - Anti-aliasing lowpass filter adapting to pitch ratio
 - ±48 semitone range, denormal guarding, RT-safe
 - Custom in-place radix-2 FFT (no Accelerate dependency — tests compile standalone)
+- **MIDI-driven auto-glide** (last-note priority, highest-note fallback)
 - Input/output peak level tracking (atomic, once per block)
-- 395 test assertions passing
+- 407 test assertions passing
 
 **Plugin**
 - AUv3 music effect (`aumf`) — receives both MIDI and audio
@@ -30,11 +31,12 @@ notes, DJ risers, vocal effects, etc.
 - **Latency reporting** for PDC (adapts when switching modes), **tail time** for bounce, **bypass** support
 - **7 factory presets** (Octave Glide Up/Down, Slow Portamento, DJ Riser, Chromatic Walk, Wobble, Step Sequence)
 - **Preset save/load** via fullState — breakpoints survive session reopen
+- **MIDI-driven auto-glide mode** — play notes and pitch glides automatically between them
 - **DAW pitch offset parameter** — Logic Pro can automate pitch from its own lane
 
 **UI**
 - **Resizable window** (min 500x350, preferred 700x500)
-- **[Granular | Vocoder] mode picker** in controls bar
+- **[Manual | Auto] glide mode picker** + **[Granular | Vocoder] quality picker** in controls bar
 - Piano roll sidebar with active MIDI note highlighting
 - Automation canvas: click to add, drag to move, double-click to delete breakpoints
 - **Curve drawing mode** (pencil tool) — drag to create breakpoints along a path
@@ -55,6 +57,7 @@ notes, DJ risers, vocal effects, etc.
 | 2    | Pitch Range   | 12–24    | semi    | 24      | Display range |
 | 3    | Pitch Offset  | -24–+24  | semi    | 0       | DAW-automatable offset |
 | 4    | Shifter Mode  | 0–1      | indexed | 0       | 0=Granular, 1=Vocoder |
+| 5    | Auto Glide    | 0–1      | bool    | 0       | 0=Manual, 1=Auto (MIDI-driven) |
 
 ## Project Layout
 
@@ -64,7 +67,7 @@ MyGlideAU/                  AUv3 app extension
   AudioUnitFactory.swift    Principal class for extension
   GlideAudioUnit.swift      AUAudioUnit subclass + render loop + presets
   Parameters/
-    GlideParameters.swift   AUParameterTree definitions (5 params)
+    GlideParameters.swift   AUParameterTree definitions (6 params)
   UI/
     GlideMainView.swift     Piano roll + automation editor + controls
   DSP/
@@ -100,9 +103,15 @@ Debug builds auto-install to `/Applications/MyGlide.app` and re-register with La
 Insert on an instrument track: Audio FX → Audio Units → Demo → MyGlide
 
 The plugin receives MIDI from the track and shows notes on the piano roll.
-Draw pitch automation by clicking on the canvas. Switch between Granular
-and Vocoder mode using the picker in the controls bar. The audio is
-pitch-shifted in real time according to the automation curve.
+
+**Manual mode**: Draw pitch automation by clicking on the canvas. The audio
+is pitch-shifted according to the automation curve.
+
+**Auto mode**: Play MIDI notes and the pitch glides smoothly between them.
+Glide speed is controlled by the Glide Time parameter. Last-note priority
+with highest-note fallback on release.
+
+Switch between Granular and Vocoder quality using the picker in the controls bar.
 
 ## Verify Registration
 
@@ -118,7 +127,7 @@ c++ -std=c++17 -O2 -I MyGlideAU/DSP Tests/test_glide_dsp.cpp -o Tests/test_glide
 ./Tests/test_glide
 ```
 
-395 test assertions covering: AutomationCurve (breakpoints, interpolation,
+407 test assertions covering: AutomationCurve (breakpoints, interpolation,
 triple-buffer, serialization, edge cases), GranularPitchShifter (frequency
 accuracy via Goertzel, extreme values, tiny buffers), PhaseVocoderPitchShifter
 (FFT roundtrip, octave shift, mode switching, latency reporting),

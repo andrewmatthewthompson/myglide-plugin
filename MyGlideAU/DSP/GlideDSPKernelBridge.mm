@@ -79,6 +79,8 @@
 - (double)currentBeatPosition { return _kernel.currentBeatPosition(); }
 - (double)currentPitchSemitones { return _kernel.currentPitchSemitones(); }
 
+- (double)autoGlideTarget { return _kernel.autoGlideTarget(); }
+
 - (double)inputLevelL { return _kernel.inputLevelL(); }
 - (double)inputLevelR { return _kernel.inputLevelR(); }
 - (double)outputLevelL { return _kernel.outputLevelL(); }

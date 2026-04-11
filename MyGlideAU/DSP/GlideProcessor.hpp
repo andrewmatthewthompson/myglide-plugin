@@ -15,6 +15,7 @@ enum ParamAddress : uint64_t {
     kPitchRange   = 2,   // Display range: 12 or 24 semitones
     kPitchOffset  = 3,   // DAW-automatable pitch offset (semitones, ±24)
     kShifterMode  = 4,   // 0=Granular, 1=Vocoder
+    kAutoGlide    = 5,   // 0=Manual (automation curve), 1=Auto (MIDI-driven)
 };
 
 /// MIDI pitch automation processor.
@@ -117,6 +118,7 @@ public:
             case kPitchRange:   mPitchRange = static_cast<int>(value); break;
             case kPitchOffset:  mSmPitchOffset.setTarget(value);  break;
             case kShifterMode:  mShifterMode = static_cast<int>(value); break;
+            case kAutoGlide:    mAutoGlide = static_cast<int>(value);  break;
         }
     }
 
@@ -127,6 +129,7 @@ public:
             case kPitchRange:   return static_cast<float>(mPitchRange);
             case kPitchOffset:  return static_cast<float>(mSmPitchOffset.current());
             case kShifterMode:  return static_cast<float>(mShifterMode);
+            case kAutoGlide:    return static_cast<float>(mAutoGlide);
         }
         return 0.0f;
     }
@@ -139,17 +142,37 @@ public:
         uint8_t velocity = data2 & 0x7F;
 
         if (type == 0x90 && velocity > 0) {
+            // Note On
             mActiveNotes[note] = velocity;
             if (note < 64)
                 mNoteBitmaskLo.fetch_or(1ULL << note, std::memory_order_relaxed);
             else
                 mNoteBitmaskHi.fetch_or(1ULL << (note - 64), std::memory_order_relaxed);
+
+            // Auto-glide: new note sets pitch target directly (last-note priority)
+            if (mAutoGlide) {
+                mLastNoteOn = note;
+                double semi = static_cast<double>(note) - static_cast<double>(kReferenceNote);
+                mAutoGlideTarget.store(semi, std::memory_order_relaxed);
+            }
         } else if (type == 0x80 || (type == 0x90 && velocity == 0)) {
+            // Note Off
             mActiveNotes[note] = 0;
             if (note < 64)
                 mNoteBitmaskLo.fetch_and(~(1ULL << note), std::memory_order_relaxed);
             else
                 mNoteBitmaskHi.fetch_and(~(1ULL << (note - 64)), std::memory_order_relaxed);
+
+            // Auto-glide: if released note was the active one, fall back to highest held note
+            if (mAutoGlide && note == mLastNoteOn) {
+                uint8_t next = findHighestActiveNote();
+                if (next > 0) {
+                    mLastNoteOn = next;
+                    double semi = static_cast<double>(next) - static_cast<double>(kReferenceNote);
+                    mAutoGlideTarget.store(semi, std::memory_order_relaxed);
+                }
+                // If no notes held, keep last pitch (sustain behavior)
+            }
         }
     }
 
@@ -202,7 +225,13 @@ public:
                 mLastGlideTimeMs = glideTimeMs;
             }
 
-            double targetSemitones = mAutomation.evaluate(beatPos) + pitchOffset;
+            // In Auto mode, MIDI drives pitch; in Manual mode, automation curve drives pitch
+            double targetSemitones;
+            if (mAutoGlide) {
+                targetSemitones = mAutoGlideTarget.load(std::memory_order_relaxed) + pitchOffset;
+            } else {
+                targetSemitones = mAutomation.evaluate(beatPos) + pitchOffset;
+            }
             mSmPitch.setTarget(targetSemitones);
             double smoothedSemitones = mSmPitch.next();
 
@@ -268,6 +297,9 @@ public:
     double outputLevelL() const { return mOutputLevelL.load(std::memory_order_relaxed); }
     double outputLevelR() const { return mOutputLevelR.load(std::memory_order_relaxed); }
 
+    /// Current auto-glide target in semitones (relative to C4). For UI display.
+    double autoGlideTarget() const { return mAutoGlideTarget.load(std::memory_order_relaxed); }
+
     /// Latency in samples — depends on active shifter mode.
     int32_t latencySamples() const {
         if (mShifterMode == 1) return mFFTSize;
@@ -287,6 +319,19 @@ private:
     double  mSampleRate   = 48000.0;
     int     mPitchRange   = 24;
     int     mShifterMode  = 0;  // 0=Granular, 1=Vocoder
+    int     mAutoGlide    = 0;  // 0=Manual (curve), 1=Auto (MIDI-driven)
+
+    // Auto-glide state
+    static constexpr uint8_t kReferenceNote = 60;  // C4 = 0 semitones
+    uint8_t mLastNoteOn = 0;
+    std::atomic<double> mAutoGlideTarget{0.0};
+
+    uint8_t findHighestActiveNote() const {
+        for (int n = 127; n >= 0; --n) {
+            if (mActiveNotes[n] > 0) return static_cast<uint8_t>(n);
+        }
+        return 0;
+    }
 
     // Parameter smoothers
     ParameterSmoother mSmGlideTime;

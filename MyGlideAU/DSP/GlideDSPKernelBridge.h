@@ -35,6 +35,9 @@
 - (double)currentBeatPosition;
 - (double)currentPitchSemitones;
 
+// Auto-glide target (for UI display)
+- (double)autoGlideTarget;
+
 // Level meters (peak per block, for UI)
 - (double)inputLevelL;
 - (double)inputLevelR;
