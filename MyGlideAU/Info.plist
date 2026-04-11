@@ -22,6 +22,8 @@
         <string>MyGlideAU.AudioUnitFactory</string>
         <key>NSExtensionAttributes</key>
         <dict>
+            <key>AudioComponentBundle</key>
+            <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
             <key>AudioComponents</key>
             <array>
                 <dict>
@@ -32,7 +34,7 @@
                     <key>manufacturer</key>
                     <string>Demo</string>
                     <key>name</key>
-                    <string>MyGlide</string>
+                    <string>Demo: MyGlide</string>
                     <key>factoryFunction</key>
                     <string>MyGlideAU.AudioUnitFactory</string>
                     <key>description</key>
