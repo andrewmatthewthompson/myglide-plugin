@@ -3,30 +3,37 @@
 AUv3 MIDI pitch automation / glide plugin for Logic Pro (macOS 13+).
 
 Draw pitch automation curves with snap-to-note breakpoints, and the plugin
-applies real-time granular pitch shifting to audio. Designed for creating
-melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
+applies real-time pitch shifting to audio. Choose between a granular shifter
+(low latency, good for effects) or a phase vocoder (higher quality, better
+for vocals). Designed for melodic pitch glides — synth leads sliding between
+notes, DJ risers, vocal effects, etc.
 
 ## Features
 
 **DSP engine** (C++17, 64-bit internal processing)
-- Granular pitch shifter (2 overlapping grains, Hann window, cubic Hermite)
+- **Two pitch shifting modes:**
+  - **Granular** — 2 overlapping grains, Hann window, cubic Hermite. 30ms latency, 0.12% CPU
+  - **Phase Vocoder** — STFT-based (FFT 2048, 75% overlap). 43ms latency, 1.7% CPU. More transparent on vocals
 - Automation curve with triple-buffered lock-free breakpoint system
 - 3 interpolation modes: Linear, Smooth (smoothstep), Step
 - Parameter smoothing on all controls (no zipper noise)
 - Anti-aliasing lowpass filter adapting to pitch ratio
 - ±48 semitone range, denormal guarding, RT-safe
-- <0.2% CPU at 48kHz, <0.5% at 192kHz (373 test assertions passing)
+- Custom in-place radix-2 FFT (no Accelerate dependency — tests compile standalone)
+- 387 test assertions passing
 
 **Plugin**
 - AUv3 music effect (`aumf`) — receives both MIDI and audio
 - MIDI note tracking with active note display on piano roll
 - Host transport sync (beat position + tempo)
-- **Latency reporting** for PDC, **tail time** for bounce, **bypass** support
-- **10 factory presets** (Octave Glide Up/Down, Slow Portamento, DJ Riser, Chromatic Walk, Wobble, Step Sequence)
+- **Latency reporting** for PDC (adapts when switching modes), **tail time** for bounce, **bypass** support
+- **7 factory presets** (Octave Glide Up/Down, Slow Portamento, DJ Riser, Chromatic Walk, Wobble, Step Sequence)
 - **Preset save/load** via fullState — breakpoints survive session reopen
 - **DAW pitch offset parameter** — Logic Pro can automate pitch from its own lane
 
 **UI**
+- **Resizable window** (min 500x350, preferred 700x500)
+- **[Granular | Vocoder] mode picker** in controls bar
 - Piano roll sidebar with active MIDI note highlighting
 - Automation canvas: click to add, drag to move, double-click to delete breakpoints
 - **Curve drawing mode** (pencil tool) — drag to create breakpoints along a path
@@ -39,12 +46,13 @@ melodic pitch glides — synth leads sliding between notes, DJ risers, etc.
 
 ## Parameters
 
-| Addr | Name         | Range    | Unit | Default | Notes |
-|------|--------------|----------|------|---------|-------|
-| 0    | Glide Time   | 1–2000   | ms   | 50      | Pitch smoothing rate |
-| 1    | Mix          | 0–100    | %    | 100     | Wet/dry |
-| 2    | Pitch Range  | 12–24    | semi | 24      | Display range |
-| 3    | Pitch Offset | -24–+24  | semi | 0       | DAW-automatable offset |
+| Addr | Name          | Range    | Unit    | Default | Notes |
+|------|---------------|----------|---------|---------|-------|
+| 0    | Glide Time    | 1–2000   | ms      | 50      | Pitch smoothing rate |
+| 1    | Mix           | 0–100    | %       | 100     | Wet/dry |
+| 2    | Pitch Range   | 12–24    | semi    | 24      | Display range |
+| 3    | Pitch Offset  | -24–+24  | semi    | 0       | DAW-automatable offset |
+| 4    | Shifter Mode  | 0–1      | indexed | 0       | 0=Granular, 1=Vocoder |
 
 ## Project Layout
 
@@ -54,19 +62,20 @@ MyGlideAU/                  AUv3 app extension
   AudioUnitFactory.swift    Principal class for extension
   GlideAudioUnit.swift      AUAudioUnit subclass + render loop + presets
   Parameters/
-    GlideParameters.swift   AUParameterTree definitions (4 params)
+    GlideParameters.swift   AUParameterTree definitions (5 params)
   UI/
     GlideMainView.swift     Piano roll + automation editor + controls
   DSP/
-    GlideProcessor.hpp      Main DSP (MIDI, automation, pitch shifting)
+    GlideProcessor.hpp      Main DSP (MIDI, automation, mode dispatch)
     AutomationCurve.hpp     Triple-buffered breakpoint system
     GranularPitchShifter.hpp  2-grain pitch shifter with Hann LUT
+    PhaseVocoderPitchShifter.hpp  STFT phase vocoder with custom FFT
     GlideDSPKernel.hpp      Thin wrapper (AudioBufferList → float**)
     GlideDSPKernelBridge.h  Obj-C interface (visible to Swift)
     GlideDSPKernelBridge.mm Obj-C++ bridge implementation
     ParameterSmoother.hpp   Exponential smoothing (no zipper noise)
 Tests/
-  test_glide_dsp.cpp        373 assertions: functional, regression, perf
+  test_glide_dsp.cpp        387 assertions: functional, regression, perf
 ```
 
 ## Requirements
@@ -89,8 +98,9 @@ Debug builds auto-install to `/Applications/MyGlide.app` and re-register with La
 Insert on an instrument track: Audio FX → Audio Units → Demo → MyGlide
 
 The plugin receives MIDI from the track and shows notes on the piano roll.
-Draw pitch automation by clicking on the canvas. The audio is pitch-shifted
-in real time according to the automation curve.
+Draw pitch automation by clicking on the canvas. Switch between Granular
+and Vocoder mode using the picker in the controls bar. The audio is
+pitch-shifted in real time according to the automation curve.
 
 ## Verify Registration
 
@@ -106,10 +116,11 @@ c++ -std=c++17 -O2 -I MyGlideAU/DSP Tests/test_glide_dsp.cpp -o Tests/test_glide
 ./Tests/test_glide
 ```
 
-373 test assertions covering: AutomationCurve (breakpoints, interpolation,
+387 test assertions covering: AutomationCurve (breakpoints, interpolation,
 triple-buffer, serialization, edge cases), GranularPitchShifter (frequency
-accuracy via Goertzel, extreme values, tiny buffers), GlideProcessor (MIDI
-tracking, parameter smoothing, beat position, bypass, automation integration),
-serialization roundtrip, display pitch readback, and enforced performance
-regression floors (>200x realtime at 48kHz, >100x at 192kHz, <5% CPU worst
-case, inline memory <25KB).
+accuracy via Goertzel, extreme values, tiny buffers), PhaseVocoderPitchShifter
+(FFT roundtrip, octave shift, mode switching, latency reporting),
+GlideProcessor (MIDI tracking, parameter smoothing, beat position, bypass,
+automation integration, vocoder/granular dispatch), and enforced performance
+regression floors (granular >200x RT, vocoder >50x RT, <5% CPU worst case,
+inline memory <25KB, vocoder memory <512KB/channel).
