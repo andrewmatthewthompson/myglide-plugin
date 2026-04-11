@@ -5,10 +5,6 @@ options:
     macOS: "13.0"
   xcodeVersion: "15.0"
 
-configFiles:
-  Debug: Local.xcconfig
-  Release: Local.xcconfig
-
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -19,9 +15,6 @@ targets:
     platform: macOS
     sources:
       - path: MyGlide
-    configFiles:
-      Debug: Local.xcconfig
-      Release: Local.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.myglide.app
@@ -51,9 +44,6 @@ targets:
     platform: macOS
     sources:
       - path: MyGlideAU
-    configFiles:
-      Debug: Local.xcconfig
-      Release: Local.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.myglide.app.au
