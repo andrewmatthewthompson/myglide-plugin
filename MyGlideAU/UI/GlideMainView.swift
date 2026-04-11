@@ -636,14 +636,18 @@ struct GlideMainView: View {
         }
         context.stroke(dividerPath, with: .color(dividerColor), lineWidth: 0.5)
 
-        // Pass 2: black keys on top
+        // Pass 2: black keys on top (shorter than white keys for a more
+        // realistic look — each black key occupies ~68% of the vertical
+        // space of a semitone row and is centred inside it).
+        let blackHeightFraction: CGFloat = 0.68
         for i in 0..<noteCount {
             let midi = noteRangeHigh - 1 - i
             if !PianoKey.isBlack(midi: midi) { continue }
 
             let active = PianoKey.isActive(midi: midi, maskLo: maskLo, maskHi: maskHi)
-            let y = CGFloat(i) * semitoneHeight + 1
-            let h = max(semitoneHeight - 2, 1)
+            let rowY = CGFloat(i) * semitoneHeight
+            let h = max(semitoneHeight * blackHeightFraction, 1)
+            let y = rowY + (semitoneHeight - h) / 2
 
             let rect = CGRect(x: 0, y: y, width: blackKeyWidth, height: h)
             let path = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
@@ -672,15 +676,22 @@ struct GlideMainView: View {
                 // Interaction layer: tap to select, drag to grab-and-bend the curve.
                 // Disabled in Auto mode (MIDI drives pitch, not breakpoints).
                 //
-                // Logic-style interaction:
-                //   • Drag on an existing breakpoint → move that breakpoint.
-                //   • Drag on empty space            → insert a new joint at the
-                //     drag-start location and drag it with the gesture, so the
-                //     user grabs the curve and bends it into a new shape.
-                //   • Pure tap on an existing breakpoint → select it.
-                //   • Pure tap on empty space       → add a breakpoint there
-                //     (kept for discoverability).
+                // Logic-style interaction (all hit tests are generous — you
+                // don't need to be exactly on a breakpoint for click/drag to
+                // pick it up):
+                //   • Drag on an existing joint → move that joint.
+                //   • Drag on empty space → insert a new joint at the drag
+                //     start and keep dragging it, so the user grabs the curve
+                //     and bends it into a new shape.
+                //   • Pure tap on an existing joint → select it.
+                //   • Pure tap on empty space → add a joint there.
+                //   • Double-click near a joint → delete it.
                 //   • Draw mode overrides all of this with the pencil behaviour.
+                //
+                // A single Color.clear hosts every gesture via simultaneous-
+                // Gesture composition so none of them starve each other out.
+                let pickThreshold: CGFloat = 22
+
                 Color.clear
                     .contentShape(Rectangle())
                     .allowsHitTesting(params.autoGlide < 0.5)
@@ -689,9 +700,9 @@ struct GlideMainView: View {
                             .onChanged { value in
                                 let movement = hypot(value.translation.width, value.translation.height)
 
-                                // Treat sub-2pt wiggles as still-a-tap to keep
+                                // Treat sub-3pt wiggles as still-a-tap to keep
                                 // click-to-add-joint feeling responsive.
-                                if !dragGestureMoved && movement < 2 {
+                                if !dragGestureMoved && movement < 3 {
                                     return
                                 }
 
@@ -705,7 +716,7 @@ struct GlideMainView: View {
                                         at: value.startLocation,
                                         size: size,
                                         pitchRange: pitchRange,
-                                        threshold: 12
+                                        threshold: pickThreshold
                                     ) {
                                         draggingBreakpointID = automation.breakpoints[idx].id
                                     } else {
@@ -732,7 +743,7 @@ struct GlideMainView: View {
                             }
                             .onEnded { value in
                                 if !dragGestureMoved {
-                                    // Pure tap: select if on a joint, otherwise add one.
+                                    // Pure tap: select if near a joint, otherwise add one.
                                     let beat = xToBeat(value.location.x, width: size.width)
                                     let semi = yToSemitones(value.location.y, height: size.height, range: pitchRange)
 
@@ -740,7 +751,7 @@ struct GlideMainView: View {
                                         at: value.location,
                                         size: size,
                                         pitchRange: pitchRange,
-                                        threshold: 12
+                                        threshold: pickThreshold
                                     ) {
                                         automation.selectedIndex = idx
                                     } else if !automation.drawMode {
@@ -753,11 +764,23 @@ struct GlideMainView: View {
                                 dragGestureMoved = false
                             }
                     )
-
-                // Pinch-to-zoom
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
+                    .simultaneousGesture(
+                        // Double-click near a joint to delete it. Runs on the
+                        // same layer as the drag gesture via simultaneous-
+                        // Gesture so it doesn't starve single clicks.
+                        SpatialTapGesture(count: 2)
+                            .onEnded { event in
+                                if let idx = nearestBreakpointIndex(
+                                    at: event.location,
+                                    size: size,
+                                    pitchRange: pitchRange,
+                                    threshold: pickThreshold
+                                ) {
+                                    automation.removeBreakpoint(index: idx)
+                                }
+                            }
+                    )
+                    .simultaneousGesture(
                         MagnificationGesture()
                             .onChanged { value in
                                 let newBeats = baseViewBeats / Double(value)
@@ -767,31 +790,6 @@ struct GlideMainView: View {
                                 baseViewBeats = viewBeats
                             }
                     )
-
-                // Breakpoint hit targets: double-click to delete, right-click for context menu
-                ForEach(Array(automation.breakpoints.enumerated()), id: \.element.id) { index, bp in
-                    let x = beatToX(bp.beat, width: size.width)
-                    let y = semitonesToY(bp.semitones, height: size.height, range: pitchRange)
-
-                    Circle()
-                        .fill(Color.clear)
-                        .frame(width: 20, height: 20)
-                        .position(x: x, y: y)
-                        .onTapGesture(count: 2) {
-                            automation.removeBreakpoint(index: index)
-                        }
-                        .contextMenu {
-                            // Per-breakpoint interpolation type
-                            Menu("Interpolation") {
-                                Button("Linear") { automation.setBreakpointInterp(index: index, interpType: 0) }
-                                Button("Smooth") { automation.setBreakpointInterp(index: index, interpType: 1) }
-                                Button("Step")   { automation.setBreakpointInterp(index: index, interpType: 2) }
-                            }
-                            Divider()
-                            Button("Duplicate") { automation.duplicateBreakpoint(index: index) }
-                            Button("Delete", role: .destructive) { automation.removeBreakpoint(index: index) }
-                        }
-                }
             }
         }
     }
