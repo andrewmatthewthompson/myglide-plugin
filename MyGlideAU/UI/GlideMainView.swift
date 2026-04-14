@@ -673,9 +673,14 @@ class AutomationState: ObservableObject {
 // MARK: - Parameter State
 
 class GlideParameterState: ObservableObject {
-    @Published var glideTime: Double = 50.0
+    // Keep these defaults in sync with the AUParameter defaults assigned
+    // in `GlideParameters.createParameters()`. Mismatches cause the UI
+    // knobs to show stale Swift defaults until the parameter tree
+    // propagates its real values, which is visible to the user as
+    // "knobs jumping to random values when I touch them".
+    @Published var glideTime: Double = 100.0
     @Published var mix: Double = 100.0
-    @Published var pitchRange: Double = 24.0
+    @Published var pitchRange: Double = 12.0
     @Published var pitchOffset: Double = 0.0
     @Published var shifterMode: Double = 0.0   // 0=Granular, 1=Vocoder
     @Published var autoGlide: Double = 0.0     // 0=Manual, 1=Auto
@@ -696,6 +701,16 @@ class GlideParameterState: ObservableObject {
             }
         })
 
+        resyncFromTree()
+    }
+
+    /// Re-reads every parameter's current value from the tree and pushes
+    /// it into the matching `@Published` property. Used to paper over
+    /// races between view creation, host state restoration, and preset
+    /// loads — any time the tree might contain a value the UI hasn't
+    /// seen, call this and the knobs catch up.
+    func resyncFromTree() {
+        guard let tree = parameterTree else { return }
         for param in tree.allParameters {
             update(address: param.address, value: Double(param.value))
         }
@@ -704,14 +719,14 @@ class GlideParameterState: ObservableObject {
     private func update(address: AUParameterAddress, value: Double) {
         isExternalUpdate = true
         switch address {
-        case 0: glideTime = value
-        case 1: mix = value
-        case 2: pitchRange = value
-        case 3: pitchOffset = value
-        case 4: shifterMode = value
-        case 5: autoGlide = value
-        case 6: loopEnabled = value
-        case 7: loopBeats = value
+        case 0: if glideTime    != value { glideTime    = value }
+        case 1: if mix          != value { mix          = value }
+        case 2: if pitchRange   != value { pitchRange   = value }
+        case 3: if pitchOffset  != value { pitchOffset  = value }
+        case 4: if shifterMode  != value { shifterMode  = value }
+        case 5: if autoGlide    != value { autoGlide    = value }
+        case 6: if loopEnabled  != value { loopEnabled  = value }
+        case 7: if loopBeats    != value { loopBeats    = value }
         default: break
         }
         isExternalUpdate = false
@@ -805,8 +820,17 @@ struct GlideMainView: View {
         .onAppear {
             params.attach(to: audioUnit)
             automation.attach(to: audioUnit.kernel)
-            audioUnit.onStateRestored = { [weak automation] in
-                automation?.restoreFromDSP()
+            audioUnit.onStateRestored = { [weak automation, weak params] in
+                // Preset / fullState restore completed. Pull the latest
+                // parameter tree values into the UI so the knobs match
+                // the DSP (otherwise the UI can be stuck on the Swift
+                // defaults while the DSP already has the saved values —
+                // which is what the user sees as "the sound is right but
+                // the knobs are wrong until I touch one").
+                DispatchQueue.main.async {
+                    params?.resyncFromTree()
+                    automation?.restoreFromDSP()
+                }
             }
             startDisplayTimer()
         }

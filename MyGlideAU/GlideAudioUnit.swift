@@ -190,9 +190,14 @@ public class GlideAudioUnit: AUAudioUnit {
             super.fullState = newValue
             if let data = newValue?[GlideAudioUnit.automationKey] as? Data {
                 kernel.automationDeserialize(from: data)
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStateRestored?()
-                }
+            }
+            // Always notify the UI so it can re-sync parameter knobs,
+            // even when the restored state did not include custom
+            // automation data. Previously this only fired when
+            // automation data was present, so parameter-only preset
+            // restores left the UI knobs stuck on stale defaults.
+            DispatchQueue.main.async { [weak self] in
+                self?.onStateRestored?()
             }
         }
     }
