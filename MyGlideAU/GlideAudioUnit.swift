@@ -93,7 +93,7 @@ public class GlideAudioUnit: AUAudioUnit {
             case 1: return String(format: "%.0f%%", value)
             case 2: return String(format: "\u{00B1}%.0f", value)
             case 3: return String(format: "%+.1f st", value)
-            case 4: return value < 0.5 ? "Granular" : "Vocoder"
+            case 4: return value < 0.5 ? "Varispeed" : "Vocoder"
             case 5: return value > 0.5 ? "Auto" : "Manual"
             case 6: return value > 0.5 ? "Loop On" : "Loop Off"
             case 7: return String(format: "%.0f beats", value)

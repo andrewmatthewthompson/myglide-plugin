@@ -918,12 +918,12 @@ struct GlideMainView: View {
 
             Divider().frame(height: 20).background(Color.white.opacity(0.3))
 
-            // Shifter mode (Granular / Vocoder)
+            // Shifter mode (Varispeed / Vocoder)
             Picker("", selection: Binding(
                 get: { Int(params.shifterMode) },
                 set: { params.sendIfLocal(4, value: Double($0)) }
             )) {
-                Text("Granular").tag(0)
+                Text("Varispeed").tag(0)
                 Text("Vocoder").tag(1)
             }
             .pickerStyle(.segmented)
