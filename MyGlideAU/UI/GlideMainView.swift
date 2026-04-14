@@ -11,6 +11,57 @@ private func noteName(midi: Int) -> String {
     return "\(name)\(octave)"
 }
 
+/// Small visual-hold for MIDI notes driving the piano sidebar.
+///
+/// The DSP kernel's note bitmask reflects the real held-note state *right
+/// now*. Polling it on the display timer means a MIDI note shorter than
+/// one poll interval can be entirely missed, and even notes that are
+/// caught flash on for a single frame which is hard to see. This class
+/// tracks the last time each note was observed active and keeps it in
+/// the display mask for a short hold window after release, so brief
+/// MIDI changes still show up on the keyboard reliably.
+private final class NoteDisplayLatch {
+    /// How long a note stays visible on the keyboard after it has been
+    /// released. 120 ms is long enough to see a flash without smearing
+    /// rapid sequences together.
+    private let holdSeconds: Double = 0.120
+
+    /// Sentinel meaning "never seen". Any real CFAbsoluteTime is > 0.
+    private static let kNeverSeen: Double = -1e9
+    private var lastSeen: [Double] = Array(repeating: NoteDisplayLatch.kNeverSeen, count: 128)
+
+    /// Refresh the latch from a raw DSP bitmask captured at time `now`
+    /// (expected to be `CFAbsoluteTimeGetCurrent()`), and return the
+    /// display bitmask (real held notes ∪ notes still inside the hold
+    /// window).
+    func update(rawMaskLo: UInt64, rawMaskHi: UInt64, now: Double) -> (UInt64, UInt64) {
+        // Touch every currently-held note so its "last seen" is fresh.
+        var lo = rawMaskLo
+        while lo != 0 {
+            let bit = lo.trailingZeroBitCount
+            lastSeen[bit] = now
+            lo &= lo - 1
+        }
+        var hi = rawMaskHi
+        while hi != 0 {
+            let bit = hi.trailingZeroBitCount
+            lastSeen[64 + bit] = now
+            hi &= hi - 1
+        }
+
+        let threshold = now - holdSeconds
+        var dispLo: UInt64 = 0
+        var dispHi: UInt64 = 0
+        for i in 0..<64 where lastSeen[i] > threshold {
+            dispLo |= UInt64(1) << i
+        }
+        for i in 0..<64 where lastSeen[64 + i] > threshold {
+            dispHi |= UInt64(1) << i
+        }
+        return (dispLo, dispHi)
+    }
+}
+
 /// Helpers for classifying MIDI notes as black/white piano keys and
 /// checking active-note state from the DSP's 128-bit note bitmask.
 private enum PianoKey {
@@ -753,6 +804,7 @@ struct GlideMainView: View {
     @State private var outputLevel: (Double, Double) = (0, 0)
     @State private var autoGlideTarget: Double = 0.0
     @State private var displayTimer: Timer?
+    @State private var noteDisplayLatch = NoteDisplayLatch()
 
     // View range (zoom/scroll)
     @State private var viewBeats: Double = 16.0
@@ -1295,15 +1347,26 @@ struct GlideMainView: View {
     }
 
     private func startDisplayTimer() {
-        // 24 Hz is smooth enough for a meter/playhead and cuts the wake
-        // load vs. the previous 30 Hz. Each state write is gated by an
-        // equality check so SwiftUI only invalidates the relevant
-        // subviews when the values actually changed.
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 24.0, repeats: true) { _ in
+        // 60 Hz is fast enough to catch even fairly brief MIDI notes
+        // (>17 ms) and lets the piano sidebar track rapid sequences in
+        // near-real-time. Each @State write is gated by an equality
+        // check and the piano sidebar / automation canvas are
+        // `Equatable` subviews, so SwiftUI only re-renders the pieces
+        // that actually changed — the extra timer wakes cost little.
+        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
             let kernel = audioUnit.kernel
 
-            let newMask = (kernel.activeNoteBitmaskLo(), kernel.activeNoteBitmaskHi())
-            if newMask != activeNoteMask { activeNoteMask = newMask }
+            // Note bitmask is passed through the display latch so brief
+            // notes stay visible for a short hold window even after the
+            // DSP's real bitmask has cleared.
+            let rawLo = kernel.activeNoteBitmaskLo()
+            let rawHi = kernel.activeNoteBitmaskHi()
+            let display = noteDisplayLatch.update(
+                rawMaskLo: rawLo,
+                rawMaskHi: rawHi,
+                now: CFAbsoluteTimeGetCurrent()
+            )
+            if display != activeNoteMask { activeNoteMask = display }
 
             let newBeat = kernel.currentBeatPosition()
             if newBeat != playheadBeat { playheadBeat = newBeat }
