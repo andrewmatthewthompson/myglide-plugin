@@ -1,0 +1,70 @@
+name: MyRythem
+options:
+  bundleIdPrefix: com.myrythem
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+
+targets:
+  MyRythem:
+    type: application
+    platform: macOS
+    sources:
+      - path: MyRythem
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.myrythem.app
+        INFOPLIST_FILE: MyRythem/Info.plist
+        CODE_SIGN_ENTITLEMENTS: MyRythem/MyRythem.entitlements
+        PRODUCT_NAME: MyRythem
+    dependencies:
+      - target: MyRythemAU
+        embed: true
+        codeSign: true
+    postBuildScripts:
+      - name: "Auto-install (Debug only)"
+        script: |
+          if [ "${CONFIGURATION}" != "Debug" ]; then exit 0; fi
+          APP="${BUILT_PRODUCTS_DIR}/MyRythem.app"
+          DEST="/Applications/MyRythem.app"
+          if pgrep -xq "Logic Pro"; then
+            echo "warning: Logic Pro is running — close it before testing"
+          fi
+          rm -rf "$DEST"
+          cp -R "$APP" "$DEST"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R "$DEST"
+          echo "Installed to $DEST — In Logic: MIDI FX → Audio Units → Demo → MyRythem"
+
+  MyRythemAU:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: MyRythemAU
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.myrythem.app.au
+        INFOPLIST_FILE: MyRythemAU/Info.plist
+        CODE_SIGN_ENTITLEMENTS: MyRythemAU/MyRythemAU.entitlements
+        PRODUCT_NAME: MyRythemAU
+        SWIFT_OBJC_BRIDGING_HEADER: MyRythemAU/DSP/MyRythemAU-Bridging-Header.h
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
+    dependencies:
+      - framework: AudioToolbox.framework
+      - framework: AVFoundation.framework
+      - framework: CoreAudioKit.framework
+
+schemes:
+  MyRythem:
+    build:
+      targets:
+        MyRythem: all
+        MyRythemAU: all
+  MyRythemAU:
+    build:
+      targets:
+        MyRythemAU: all

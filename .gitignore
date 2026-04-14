@@ -12,6 +12,7 @@ build/
 # Test binaries
 Tests/test_glide
 Tests/bench_glide
+MyRythem/Tests/test_rythem
 
 # macOS
 .DS_Store

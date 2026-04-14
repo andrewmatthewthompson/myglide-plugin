@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>MyRythemAU</string>
+    <key>CFBundleDisplayName</key>
+    <string>MyRythemAU</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.AudioUnit-UI</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>MyRythemAU.AudioUnitFactory</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>AudioComponentBundle</key>
+            <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+            <key>AudioComponents</key>
+            <array>
+                <dict>
+                    <key>type</key>
+                    <string>aumi</string>
+                    <key>subtype</key>
+                    <string>Ryt1</string>
+                    <key>manufacturer</key>
+                    <string>Demo</string>
+                    <key>name</key>
+                    <string>Demo: MyRythem</string>
+                    <key>factoryFunction</key>
+                    <string>MyRythemAU.AudioUnitFactory</string>
+                    <key>description</key>
+                    <string>MyRythem AUv3 chord-rhythm MIDI effect</string>
+                    <key>tags</key>
+                    <array>
+                        <string>MIDI</string>
+                        <string>Effects</string>
+                    </array>
+                    <key>version</key>
+                    <integer>65536</integer>
+                    <key>sandboxSafe</key>
+                    <true/>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+</dict>
+</plist>
